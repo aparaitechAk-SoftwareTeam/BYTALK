@@ -99,6 +99,58 @@ function App() {
   const [word, setWord] = useState('');
   const [backendUp, setBackendUp] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [signInEmail, setSignInEmail] = useState('');
+  const [signInPassword, setSignInPassword] = useState('');
+  const [signInShowPwd, setSignInShowPwd] = useState(false);
+  const [signUpName, setSignUpName] = useState('');
+  const [signUpEmail, setSignUpEmail] = useState('');
+  const [signUpPassword, setSignUpPassword] = useState('');
+  const [signUpConfirm, setSignUpConfirm] = useState('');
+  const [signUpShowPwd, setSignUpShowPwd] = useState(false);
+  const [signUpShowConfirm, setSignUpShowConfirm] = useState(false);
+
+  const handleSignIn = async () => {
+    if (!signInEmail.trim() || !signInPassword.trim()) {
+      Alert.alert('Missing fields', 'Please enter your email and password.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await request('auth/signin', {
+        method: 'POST',
+        body: JSON.stringify({ email: signInEmail, password: signInPassword }),
+      });
+      setBackendUp(true);
+    } catch {
+      Alert.alert('Offline preview', 'Backend not reachable. Navigating in demo mode.');
+    }
+    setBusy(false);
+    setScreen('discover');
+  };
+
+  const handleSignUp = async () => {
+    if (!signUpName.trim() || !signUpEmail.trim() || !signUpPassword.trim()) {
+      Alert.alert('Missing fields', 'Please fill in all required fields.');
+      return;
+    }
+    if (signUpPassword !== signUpConfirm) {
+      Alert.alert('Password mismatch', 'Passwords do not match.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await request('auth/signup', {
+        method: 'POST',
+        body: JSON.stringify({ name: signUpName, email: signUpEmail, password: signUpPassword }),
+      });
+      setBackendUp(true);
+    } catch {
+      Alert.alert('Offline preview', 'Backend not reachable. Navigating in demo mode.');
+    }
+    setBusy(false);
+    setName(signUpName);
+    setScreen('onboard');
+  };
 
   const refresh = async () => {
     try {
@@ -231,7 +283,7 @@ function App() {
       <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
 
       {/* Top brand header (only shown when not on welcome screen) */}
-      {screen !== 'welcome' && (
+      {!['welcome', 'signin', 'signup'].includes(screen) && (
         <View style={styles.topBar}>
           <TouchableOpacity onPress={() => setScreen('welcome')} style={styles.logoRowSmall}>
             <Image source={require('./assets/logo_icon.png')} style={{ width: 22, height: 22, marginRight: 6 }} resizeMode="contain" />
@@ -303,9 +355,238 @@ function App() {
 
             <View style={styles.signInRow}>
               <Text style={styles.signInLabel}>Already have an account? </Text>
-              <TouchableOpacity onPress={() => setScreen('discover')} activeOpacity={0.7}>
+              <TouchableOpacity onPress={() => setScreen('signin')} activeOpacity={0.7}>
                 <Text style={styles.signInLink}>Sign In</Text>
               </TouchableOpacity>
+            </View>
+          </View>
+        </ScrollView>
+      )}
+
+      {/* SCREEN: SIGN IN */}
+      {screen === 'signin' && (
+        <ScrollView
+          contentContainerStyle={{ flexGrow: 1, paddingHorizontal: 24, paddingTop: 10, paddingBottom: 30 }}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* Back button */}
+          <TouchableOpacity onPress={() => setScreen('welcome')} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 20, marginTop: 8 }}>
+            <Ionicons name="chevron-back" size={24} color={navy} />
+          </TouchableOpacity>
+
+          {/* Logo */}
+          <View style={{ alignItems: 'center', marginBottom: 24 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Image source={require('./assets/logo_icon.png')} style={{ width: 34, height: 34, marginRight: 8 }} resizeMode="contain" />
+              <Text style={{ fontSize: 24, fontWeight: '900', color: navy }}>BY<Text style={{ color: orange }}>TALK</Text></Text>
+            </View>
+            <Txt size={11} color={muted} style={{ marginTop: 3, letterSpacing: 1.5 }}>Talk  \u2022  Learn  \u2022  Connect</Txt>
+          </View>
+
+          {/* Title */}
+          <View style={{ alignItems: 'center', marginBottom: 28 }}>
+            <Txt size={26} bold style={{ textAlign: 'center' }}>Welcome Back</Txt>
+            <Txt size={14} color={muted} style={{ textAlign: 'center', marginTop: 8 }}>Sign in to continue your language journey</Txt>
+          </View>
+
+          {/* Email field */}
+          <View style={authStyles.inputContainer}>
+            <Ionicons name="mail-outline" size={20} color={muted} style={{ marginRight: 12 }} />
+            <TextInput
+              value={signInEmail}
+              onChangeText={setSignInEmail}
+              placeholder="Email address"
+              placeholderTextColor="#9CA3AF"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              style={authStyles.inputText}
+            />
+          </View>
+
+          {/* Password field */}
+          <View style={authStyles.inputContainer}>
+            <Ionicons name="lock-closed-outline" size={20} color={muted} style={{ marginRight: 12 }} />
+            <TextInput
+              value={signInPassword}
+              onChangeText={setSignInPassword}
+              placeholder="Password"
+              placeholderTextColor="#9CA3AF"
+              secureTextEntry={!signInShowPwd}
+              style={authStyles.inputText}
+            />
+            <TouchableOpacity onPress={() => setSignInShowPwd(!signInShowPwd)}>
+              <Ionicons name={signInShowPwd ? 'eye-off-outline' : 'eye-outline'} size={20} color={muted} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Forgot password */}
+          <TouchableOpacity style={{ alignSelf: 'flex-end', marginBottom: 24 }}>
+            <Txt size={13} color={orange} bold>Forgot Password?</Txt>
+          </TouchableOpacity>
+
+          {/* Sign In button */}
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={handleSignIn}
+            style={authStyles.primaryButton}
+          >
+            <Txt color="#fff" bold size={16}>{busy ? 'Signing In...' : 'Sign In'}</Txt>
+          </TouchableOpacity>
+
+          {/* OR divider */}
+          <View style={authStyles.orRow}>
+            <View style={authStyles.orLine} />
+            <Txt size={13} color={muted} style={{ marginHorizontal: 14 }}>OR</Txt>
+            <View style={authStyles.orLine} />
+          </View>
+
+          {/* Social buttons */}
+          <TouchableOpacity style={authStyles.socialButton}>
+            <Ionicons name="logo-google" size={20} color="#EA4335" style={{ marginRight: 12 }} />
+            <Txt size={14} bold>Continue with Google</Txt>
+          </TouchableOpacity>
+          <TouchableOpacity style={authStyles.socialButton}>
+            <Ionicons name="logo-apple" size={20} color="#000" style={{ marginRight: 12 }} />
+            <Txt size={14} bold>Continue with Apple</Txt>
+          </TouchableOpacity>
+          <TouchableOpacity style={authStyles.socialButton}>
+            <Ionicons name="logo-facebook" size={20} color="#1877F2" style={{ marginRight: 12 }} />
+            <Txt size={14} bold>Continue with Facebook</Txt>
+          </TouchableOpacity>
+
+          {/* Don't have account */}
+          <View style={{ flexDirection: 'row', justifyContent: 'center', marginTop: 28 }}>
+            <Txt size={14} color={muted}>Don't have an account?  </Txt>
+            <TouchableOpacity onPress={() => setScreen('signup')}>
+              <Txt size={14} color={orange} bold>Sign Up</Txt>
+            </TouchableOpacity>
+          </View>
+        </ScrollView>
+      )}
+
+      {/* SCREEN: SIGN UP */}
+      {screen === 'signup' && (
+        <ScrollView
+          contentContainerStyle={{ flexGrow: 1, paddingHorizontal: 24, paddingTop: 10, paddingBottom: 30 }}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* Back button */}
+          <TouchableOpacity onPress={() => setScreen('signin')} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 20, marginTop: 8 }}>
+            <Ionicons name="chevron-back" size={24} color={navy} />
+          </TouchableOpacity>
+
+          {/* Logo */}
+          <View style={{ alignItems: 'center', marginBottom: 24 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Image source={require('./assets/logo_icon.png')} style={{ width: 34, height: 34, marginRight: 8 }} resizeMode="contain" />
+              <Text style={{ fontSize: 24, fontWeight: '900', color: navy }}>BY<Text style={{ color: orange }}>TALK</Text></Text>
+            </View>
+            <Txt size={11} color={muted} style={{ marginTop: 3, letterSpacing: 1.5 }}>Talk  \u2022  Learn  \u2022  Connect</Txt>
+          </View>
+
+          {/* Title */}
+          <View style={{ alignItems: 'center', marginBottom: 28 }}>
+            <Txt size={26} bold style={{ textAlign: 'center' }}>Create Account</Txt>
+            <Txt size={14} color={muted} style={{ textAlign: 'center', marginTop: 8 }}>Start your language learning journey</Txt>
+          </View>
+
+          {/* Full Name */}
+          <View style={authStyles.inputContainer}>
+            <Ionicons name="person-outline" size={20} color={muted} style={{ marginRight: 12 }} />
+            <TextInput
+              value={signUpName}
+              onChangeText={setSignUpName}
+              placeholder="Full Name"
+              placeholderTextColor="#9CA3AF"
+              style={authStyles.inputText}
+            />
+          </View>
+
+          {/* Email */}
+          <View style={authStyles.inputContainer}>
+            <Ionicons name="mail-outline" size={20} color={muted} style={{ marginRight: 12 }} />
+            <TextInput
+              value={signUpEmail}
+              onChangeText={setSignUpEmail}
+              placeholder="Email address"
+              placeholderTextColor="#9CA3AF"
+              keyboardType="email-address"
+              autoCapitalize="none"
+              style={authStyles.inputText}
+            />
+          </View>
+
+          {/* Password */}
+          <View style={authStyles.inputContainer}>
+            <Ionicons name="lock-closed-outline" size={20} color={muted} style={{ marginRight: 12 }} />
+            <TextInput
+              value={signUpPassword}
+              onChangeText={setSignUpPassword}
+              placeholder="Password"
+              placeholderTextColor="#9CA3AF"
+              secureTextEntry={!signUpShowPwd}
+              style={authStyles.inputText}
+            />
+            <TouchableOpacity onPress={() => setSignUpShowPwd(!signUpShowPwd)}>
+              <Ionicons name={signUpShowPwd ? 'eye-off-outline' : 'eye-outline'} size={20} color={muted} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Confirm Password */}
+          <View style={authStyles.inputContainer}>
+            <Ionicons name="lock-closed-outline" size={20} color={muted} style={{ marginRight: 12 }} />
+            <TextInput
+              value={signUpConfirm}
+              onChangeText={setSignUpConfirm}
+              placeholder="Confirm Password"
+              placeholderTextColor="#9CA3AF"
+              secureTextEntry={!signUpShowConfirm}
+              style={authStyles.inputText}
+            />
+            <TouchableOpacity onPress={() => setSignUpShowConfirm(!signUpShowConfirm)}>
+              <Ionicons name={signUpShowConfirm ? 'eye-off-outline' : 'eye-outline'} size={20} color={muted} />
+            </TouchableOpacity>
+          </View>
+
+          {/* Sign Up button */}
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={handleSignUp}
+            style={[authStyles.primaryButton, { marginTop: 6 }]}
+          >
+            <Txt color="#fff" bold size={16}>{busy ? 'Creating Account...' : 'Sign Up'}</Txt>
+          </TouchableOpacity>
+
+          {/* OR divider */}
+          <View style={authStyles.orRow}>
+            <View style={authStyles.orLine} />
+            <Txt size={13} color={muted} style={{ marginHorizontal: 14 }}>OR</Txt>
+            <View style={authStyles.orLine} />
+          </View>
+
+          {/* Social buttons */}
+          <TouchableOpacity style={authStyles.socialButton}>
+            <Ionicons name="logo-google" size={20} color="#EA4335" style={{ marginRight: 12 }} />
+            <Txt size={14} bold>Continue with Google</Txt>
+          </TouchableOpacity>
+          <TouchableOpacity style={authStyles.socialButton}>
+            <Ionicons name="logo-apple" size={20} color="#000" style={{ marginRight: 12 }} />
+            <Txt size={14} bold>Continue with Apple</Txt>
+          </TouchableOpacity>
+          <TouchableOpacity style={authStyles.socialButton}>
+            <Ionicons name="logo-facebook" size={20} color="#1877F2" style={{ marginRight: 12 }} />
+            <Txt size={14} bold>Continue with Facebook</Txt>
+          </TouchableOpacity>
+
+          {/* Terms */}
+          <View style={{ alignItems: 'center', marginTop: 24 }}>
+            <Txt size={12} color={muted} style={{ textAlign: 'center' }}>By signing up, you agree to our</Txt>
+            <View style={{ flexDirection: 'row', marginTop: 4 }}>
+              <TouchableOpacity><Txt size={12} color={orange} bold>Terms of Service</Txt></TouchableOpacity>
+              <Txt size={12} color={muted}>  and  </Txt>
+              <TouchableOpacity><Txt size={12} color={orange} bold>Privacy Policy</Txt></TouchableOpacity>
             </View>
           </View>
         </ScrollView>
@@ -574,7 +855,7 @@ function App() {
       )}
 
       {/* BOTTOM TAB BAR (VISIBLE ON MAIN SCREENS) */}
-      {!['welcome', 'onboard', 'level'].includes(screen) && (
+      {!['welcome', 'onboard', 'level', 'signin', 'signup'].includes(screen) && (
         <View style={styles.tabBar}>
           {tabItems.map(([id, icon, label]) => (
             <TouchableOpacity key={id} onPress={() => setScreen(id)} style={styles.tabItem}>
@@ -818,6 +1099,58 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     gap: 4,
+  },
+});
+
+const authStyles = StyleSheet.create({
+  inputContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff',
+    borderWidth: 1.5,
+    borderColor: '#E5E7EB',
+    borderRadius: 14,
+    paddingHorizontal: 16,
+    paddingVertical: Platform.OS === 'ios' ? 16 : 4,
+    marginBottom: 14,
+  },
+  inputText: {
+    flex: 1,
+    fontSize: 15,
+    color: '#141727',
+  },
+  primaryButton: {
+    backgroundColor: '#FF6847',
+    paddingVertical: 16,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#FF6847',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+  orRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: 22,
+  },
+  orLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: '#E5E7EB',
+  },
+  socialButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#fff',
+    borderWidth: 1.5,
+    borderColor: '#E5E7EB',
+    borderRadius: 26,
+    paddingVertical: 14,
+    marginBottom: 12,
   },
 });
 
