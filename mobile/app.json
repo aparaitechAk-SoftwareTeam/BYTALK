@@ -12,6 +12,8 @@
     "android": {
       "package": "com.bytalk.languageapp"
     },
-    "plugins": []
+    "plugins": [
+      "expo-secure-store"
+    ]
   }
 }
