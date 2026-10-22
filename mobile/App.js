@@ -16,6 +16,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { io } from 'socket.io-client';
+import UserDashboard from './src/components/UserDashboard';
 
 const API = process.env.EXPO_PUBLIC_API_URL || (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000');
 const orange = '#FF6847';
@@ -99,16 +100,39 @@ function App() {
   const [word, setWord] = useState('');
   const [backendUp, setBackendUp] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [userStats, setUserStats] = useState({ streak: 12, minutes: 150, words: 28 });
+  const [loading, setLoading] = useState(false);
 
   const refresh = async () => {
     try {
-      const [p, r, v] = await Promise.all([request('partners'), request('rooms'), request('vocabulary/u1')]);
+      setLoading(true);
+      const [users, p, r, v] = await Promise.all([
+        request('users'),
+        request('partners'),
+        request('rooms'),
+        request('vocabulary/u1'),
+      ]);
+      const me = users?.find?.((u) => u.id === 'u1');
+      if (me) {
+        if (me.name) setName(me.name);
+        if (me.country) setCountry(me.country);
+        if (me.nativeLanguage) setNativeLanguage(me.nativeLanguage);
+        if (me.learningLanguage) setLearningLanguage(me.learningLanguage);
+        if (me.level) setLevel(me.level);
+        setUserStats({
+          streak: me.streak ?? 12,
+          minutes: me.minutes ?? 150,
+          words: (me.words ?? 28) + (v?.length || 0),
+        });
+      }
       setPartners(p);
       setRooms(r);
       setVocab(v);
       setBackendUp(true);
     } catch {
       setBackendUp(false);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -171,25 +195,28 @@ function App() {
     }
   }
 
-  async function addWord() {
-    if (!word.trim()) return;
+  async function addWord(customWord) {
+    const textToAdd = (typeof customWord === 'string' ? customWord : word).trim();
+    if (!textToAdd) return;
     try {
       const x = await request('vocabulary', {
         method: 'POST',
-        body: JSON.stringify({ userId: 'u1', word, category: 'Conversation' }),
+        body: JSON.stringify({ userId: 'u1', word: textToAdd, category: 'Vocabulary' }),
       });
       setVocab((v) => [...v, x]);
-      setWord('');
+      setUserStats((prev) => ({ ...prev, words: (prev.words || 0) + 1 }));
+      if (typeof customWord !== 'string') setWord('');
     } catch {
       Alert.alert('Connection required', 'Start backend first.');
     }
   }
 
   const tabItems = [
+    ['dashboard', 'home', 'Home'],
     ['discover', 'compass', 'Discover'],
     ['rooms', 'mic', 'Rooms'],
     ['chat', 'chatbubbles', 'Messages'],
-    ['dashboard', 'bar-chart', 'Profile'],
+    ['profile', 'person', 'Profile'],
   ];
 
   const Header = ({ title, subtitle, onBack }) => (
@@ -231,7 +258,7 @@ function App() {
       <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
 
       {/* Top brand header (only shown when not on welcome screen) */}
-      {screen !== 'welcome' && (
+      {screen !== 'welcome' && screen !== 'dashboard' && (
         <View style={styles.topBar}>
           <TouchableOpacity onPress={() => setScreen('welcome')} style={styles.logoRowSmall}>
             <Image source={require('./assets/logo_icon.png')} style={{ width: 22, height: 22, marginRight: 6 }} resizeMode="contain" />
@@ -303,7 +330,7 @@ function App() {
 
             <View style={styles.signInRow}>
               <Text style={styles.signInLabel}>Already have an account? </Text>
-              <TouchableOpacity onPress={() => setScreen('discover')} activeOpacity={0.7}>
+              <TouchableOpacity onPress={() => setScreen('dashboard')} activeOpacity={0.7}>
                 <Text style={styles.signInLink}>Sign In</Text>
               </TouchableOpacity>
             </View>
@@ -374,7 +401,7 @@ function App() {
               />
             </TouchableOpacity>
           ))}
-          <Btn label={busy ? 'Saving...' : 'Continue  →'} onPress={() => saveProfile('discover')} style={{ marginTop: 8 }} />
+          <Btn label={busy ? 'Saving...' : 'Continue  →'} onPress={() => saveProfile('dashboard')} style={{ marginTop: 8 }} />
         </ScrollView>
       )}
 
@@ -523,8 +550,35 @@ function App() {
         </>
       )}
 
-      {/* SCREEN 7: PROFILE / DASHBOARD */}
+      {/* SCREEN 7: USER DASHBOARD */}
       {screen === 'dashboard' && (
+        <UserDashboard
+          user={{
+            id: 'u1',
+            name,
+            country,
+            nativeLanguage,
+            learningLanguage,
+            level,
+          }}
+          userStats={userStats}
+          partners={partners}
+          rooms={rooms}
+          messages={messages}
+          vocabulary={vocab}
+          backendUp={backendUp}
+          isLoading={loading}
+          onNavigate={(targetScreen) => setScreen(targetScreen)}
+          onSelectPartner={(partner) => setSelected(partner)}
+          onJoinRoom={(room) => join(room)}
+          onAddWord={(customWord) => addWord(customWord)}
+          onLogout={() => setScreen('welcome')}
+          onRefresh={refresh}
+        />
+      )}
+
+      {/* SCREEN 8: USER PROFILE */}
+      {screen === 'profile' && (
         <ScrollView contentContainerStyle={{ padding: 22 }}>
           <View style={{ alignItems: 'center', marginTop: 12, marginBottom: 20 }}>
             <Txt size={52}>👨🏽‍💻</Txt>
@@ -533,9 +587,9 @@ function App() {
           </View>
           <View style={styles.statsCard}>
             {[
-              ['🔥', '12', 'day streak'],
-              ['🕒', '180', 'speaking mins'],
-              ['⭐', String(28 + vocab.length), 'new words'],
+              ['🔥', `${userStats.streak}`, 'day streak'],
+              ['🕒', `${userStats.minutes}`, 'speaking mins'],
+              ['⭐', `${userStats.words}`, 'saved items'],
             ].map(([emoji, n, label]) => (
               <View key={label} style={{ alignItems: 'center' }}>
                 <Txt size={20}>{emoji} {n}</Txt>
