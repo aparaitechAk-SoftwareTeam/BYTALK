@@ -11,3 +11,4 @@ return <div className="shell"><aside><h1>BY<span>TALK</span></h1><p>ADMIN CONSOL
 {tab==='Reports'&&<div className="panel"><h3>User reports</h3>{reports.length===0?<p>No reports yet.</p>:reports.map(x=><div className="room" key={x.id}><div><b>{x.reason}</b><p>{x.reportedUserId||'Not specified'} · {x.status}</p></div>{x.status==='open'&&<button className="action" onClick={()=>resolve(x.id)}>Resolve</button>}</div>)}</div>}
 </main></div>}
 createRoot(document.getElementById('root')).render(<App/>);
+

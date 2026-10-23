@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,7 +8,6 @@ import {
   Image,
   Modal,
   ActivityIndicator,
-  Animated,
   Dimensions,
   Platform,
 } from 'react-native';
@@ -16,6 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { COMMON_PHRASES, PHRASE_CATEGORIES } from '../data/phrasesData';
 import { WORD_OF_THE_DAY, VOCAB_QUIZ_QUESTIONS } from '../data/wordOfTheDayData';
+import { speakEnglish, stopSpeech } from '../utils/speechHelper';
 
 const { width: windowWidth } = Dimensions.get('window');
 const isWebOrTablet = windowWidth > 640;
@@ -24,7 +24,6 @@ const orange = '#FF6847';
 const orangeDark = '#FF5226';
 const orangeLight = '#FFF4EE';
 const navy = '#141727';
-const navyMuted = '#2D324D';
 const muted = '#6B7280';
 const light = '#F8FAFC';
 const border = '#E5E7EB';
@@ -46,22 +45,32 @@ export default function UserDashboard({
   vocabulary = [],
   backendUp = false,
   isLoading = false,
+  allUsers = [],
   onNavigate,
   onSelectPartner,
   onJoinRoom,
   onAddWord,
   onLogout,
   onRefresh,
+  onSwitchUser,
 }) {
   // Phrases category filter
   const [selectedPhraseCategory, setSelectedPhraseCategory] = useState('All');
   const [savedPhraseIds, setSavedPhraseIds] = useState({});
   const [wordSaved, setWordSaved] = useState(false);
+  const [speakingId, setSpeakingId] = useState(null);
 
   // Modals state
   const [showMatchModal, setShowMatchModal] = useState(false);
   const [matchState, setMatchState] = useState('idle'); // 'searching', 'matched', 'idle'
   const [matchedPartner, setMatchedPartner] = useState(null);
+
+  // Live Call State
+  const [showVoiceCallModal, setShowVoiceCallModal] = useState(false);
+  const [activeCallPartner, setActiveCallPartner] = useState(null);
+  const [callSeconds, setCallSeconds] = useState(0);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isSpeakerOn, setIsSpeakerOn] = useState(true);
 
   const [showQuizModal, setShowQuizModal] = useState(false);
   const [currentQuizIndex, setCurrentQuizIndex] = useState(0);
@@ -72,10 +81,42 @@ export default function UserDashboard({
   const [showNotificationsModal, setShowNotificationsModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
 
+  // Call timer interval
+  useEffect(() => {
+    let timer;
+    if (showVoiceCallModal) {
+      timer = setInterval(() => {
+        setCallSeconds((prev) => prev + 1);
+      }, 1000);
+    } else {
+      setCallSeconds(0);
+    }
+    return () => clearInterval(timer);
+  }, [showVoiceCallModal]);
+
+  const formatCallTimer = (totalSeconds) => {
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
+
   // Filtered phrases
   const filteredPhrases = COMMON_PHRASES.filter(
     (p) => selectedPhraseCategory === 'All' || p.category === selectedPhraseCategory
   );
+
+  // Audio Speech Pronunciation
+  const handleSpeak = (text, id) => {
+    setSpeakingId(id);
+    speakEnglish(
+      text,
+      () => setSpeakingId(id),
+      () => setSpeakingId(null)
+    );
+    setTimeout(() => {
+      setSpeakingId((prev) => (prev === id ? null : prev));
+    }, 4000);
+  };
 
   // Handle Save Phrase
   const handleSavePhrase = (phraseItem) => {
@@ -95,7 +136,7 @@ export default function UserDashboard({
     setMatchState('searching');
     setMatchedPartner(null);
 
-    // Simulate reliable pairing from real backend partners
+    // Pick partner from real candidates
     setTimeout(() => {
       const candidates = partners.length > 0 ? partners : [
         { id: 'u2', name: 'Yuki', country: 'Japan', nativeLanguage: 'Japanese', learningLanguage: 'English', level: 'Intermediate', online: true },
@@ -104,10 +145,17 @@ export default function UserDashboard({
       const pick = candidates[Math.floor(Math.random() * candidates.length)];
       setMatchedPartner(pick);
       setMatchState('matched');
-    }, 1800);
+    }, 1600);
   };
 
-  // Connect to Matched Partner
+  // Start Call from Match
+  const handleStartCallWithPartner = (partnerToCall) => {
+    setShowMatchModal(false);
+    setActiveCallPartner(partnerToCall || matchedPartner);
+    setShowVoiceCallModal(true);
+  };
+
+  // Connect to Matched Partner in Chat
   const handleConnectToPartner = () => {
     if (matchedPartner) {
       setShowMatchModal(false);
@@ -118,7 +166,7 @@ export default function UserDashboard({
 
   // Quiz Answer selection
   const handleSelectQuizOption = (optIndex) => {
-    if (selectedQuizOption !== null) return; // Prevent multiple clicks
+    if (selectedQuizOption !== null) return;
     setSelectedQuizOption(optIndex);
     const isCorrect = optIndex === VOCAB_QUIZ_QUESTIONS[currentQuizIndex].correctIndex;
     if (isCorrect) {
@@ -132,7 +180,7 @@ export default function UserDashboard({
       } else {
         setQuizFinished(true);
       }
-    }, 1200);
+    }, 1100);
   };
 
   const restartQuiz = () => {
@@ -143,7 +191,8 @@ export default function UserDashboard({
   };
 
   // Extract recent conversations from messages or partners
-  const recentPartnerIds = [...new Set(messages.map((m) => (m.from === 'u1' ? m.to : m.from)))];
+  const currentUserId = user?.id || 'u1';
+  const recentPartnerIds = [...new Set(messages.map((m) => (m.from === currentUserId ? m.to : m.from)))];
   const recentPartners = partners.filter((p) => recentPartnerIds.includes(p.id));
 
   return (
@@ -213,7 +262,7 @@ export default function UserDashboard({
 
         {/* Personalized Welcome Banner */}
         <View style={styles.userGreetingRow}>
-          <View>
+          <View style={{ flex: 1 }}>
             <Text style={styles.greetingTitle}>
               Hello, {user?.name || 'Language Learner'}! 👋
             </Text>
@@ -320,9 +369,7 @@ export default function UserDashboard({
           {/* Card 3: Public Listening */}
           <TouchableOpacity
             style={[styles.quickCard, { borderColor: '#BBF7D0' }]}
-            onPress={() => {
-              onNavigate('rooms');
-            }}
+            onPress={() => onNavigate('rooms')}
             activeOpacity={0.85}
           >
             <View style={[styles.quickIconCircle, { backgroundColor: greenLight }]}>
@@ -363,10 +410,7 @@ export default function UserDashboard({
           {/* Card 5: Common English Phrases */}
           <TouchableOpacity
             style={[styles.quickCard, { borderColor: '#FED7AA' }]}
-            onPress={() => {
-              // Focus on phrases section
-              setSelectedPhraseCategory('Workplace');
-            }}
+            onPress={() => setSelectedPhraseCategory('Workplace')}
             activeOpacity={0.85}
           >
             <View style={[styles.quickIconCircle, { backgroundColor: amberLight }]}>
@@ -418,7 +462,6 @@ export default function UserDashboard({
         ) : (
           <View style={styles.progressCardContainer}>
             <View style={styles.statsRow}>
-              {/* Stat 1: Streak */}
               <View style={styles.statBox}>
                 <View style={styles.statIconBadge}>
                   <Text style={{ fontSize: 20 }}>🔥</Text>
@@ -427,7 +470,6 @@ export default function UserDashboard({
                 <Text style={styles.statLabel}>Day Streak</Text>
               </View>
 
-              {/* Stat 2: Minutes */}
               <View style={styles.statBox}>
                 <View style={styles.statIconBadge}>
                   <Text style={{ fontSize: 20 }}>⏱️</Text>
@@ -436,7 +478,6 @@ export default function UserDashboard({
                 <Text style={styles.statLabel}>Speaking Mins</Text>
               </View>
 
-              {/* Stat 3: Words & Phrases */}
               <View style={styles.statBox}>
                 <View style={styles.statIconBadge}>
                   <Text style={{ fontSize: 20 }}>📚</Text>
@@ -445,7 +486,6 @@ export default function UserDashboard({
                 <Text style={styles.statLabel}>Vocabulary Saved</Text>
               </View>
 
-              {/* Stat 4: Live Audio */}
               <View style={styles.statBox}>
                 <View style={styles.statIconBadge}>
                   <Text style={{ fontSize: 20 }}>🎙️</Text>
@@ -455,7 +495,6 @@ export default function UserDashboard({
               </View>
             </View>
 
-            {/* Weekly Target Bar */}
             <View style={styles.goalContainer}>
               <View style={styles.goalHeaderRow}>
                 <Text style={styles.goalTitle}>Weekly Speaking Target</Text>
@@ -478,7 +517,7 @@ export default function UserDashboard({
         {/* ========================================================== */}
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionTitle}>Daily Learning Challenge</Text>
-          <Text style={styles.sectionCaption}>Expand vocabulary with real context</Text>
+          <Text style={styles.sectionCaption}>Audio pronunciation & real context</Text>
         </View>
 
         <View style={styles.wordOfTheDayCard}>
@@ -493,6 +532,30 @@ export default function UserDashboard({
           <View style={styles.wotdMainRow}>
             <Text style={styles.wotdWord}>{WORD_OF_THE_DAY.word}</Text>
             <Text style={styles.wotdPhonetic}>{WORD_OF_THE_DAY.phonetic}</Text>
+
+            {/* Audio Pronunciation Button */}
+            <TouchableOpacity
+              style={[
+                styles.speakerPill,
+                speakingId === 'wotd' && styles.speakerPillActive,
+              ]}
+              onPress={() => handleSpeak(WORD_OF_THE_DAY.word, 'wotd')}
+              accessibilityLabel="Listen to pronunciation"
+            >
+              <Ionicons
+                name={speakingId === 'wotd' ? 'volume-high' : 'volume-medium-outline'}
+                size={17}
+                color={speakingId === 'wotd' ? green : orange}
+              />
+              <Text
+                style={[
+                  styles.speakerPillText,
+                  speakingId === 'wotd' && { color: green },
+                ]}
+              >
+                {speakingId === 'wotd' ? 'Speaking...' : 'Pronounce'}
+              </Text>
+            </TouchableOpacity>
           </View>
 
           <Text style={styles.wotdMeaning}>{WORD_OF_THE_DAY.meaning}</Text>
@@ -546,7 +609,7 @@ export default function UserDashboard({
         {/* ========================================================== */}
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionTitle}>Common English Phrases</Text>
-          <Text style={styles.sectionCaption}>Categorized expressions for real life</Text>
+          <Text style={styles.sectionCaption}>Audio pronunciation for real life</Text>
         </View>
 
         {/* Phrase Category Filter Tabs */}
@@ -583,6 +646,7 @@ export default function UserDashboard({
         <View style={styles.phrasesListContainer}>
           {filteredPhrases.slice(0, 4).map((phrase) => {
             const isSaved = !!savedPhraseIds[phrase.id];
+            const isSpeaking = speakingId === phrase.id;
             return (
               <View key={phrase.id} style={styles.phraseCard}>
                 <View style={styles.phraseCardHeader}>
@@ -597,6 +661,31 @@ export default function UserDashboard({
                 <Text style={styles.phraseContext}>💡 {phrase.context}</Text>
 
                 <View style={styles.phraseFooterRow}>
+                  {/* Speak Phrase Audio Button */}
+                  <TouchableOpacity
+                    style={[
+                      styles.phraseAudioButton,
+                      isSpeaking && styles.phraseAudioButtonActive,
+                    ]}
+                    onPress={() => handleSpeak(phrase.phrase, phrase.id)}
+                    accessibilityLabel="Listen to phrase pronunciation"
+                  >
+                    <Ionicons
+                      name={isSpeaking ? 'volume-high' : 'volume-medium-outline'}
+                      size={16}
+                      color={isSpeaking ? green : orange}
+                    />
+                    <Text
+                      style={[
+                        styles.phraseAudioText,
+                        isSpeaking && { color: green },
+                      ]}
+                    >
+                      {isSpeaking ? 'Speaking...' : 'Listen'}
+                    </Text>
+                  </TouchableOpacity>
+
+                  {/* Save Phrase Button */}
                   <TouchableOpacity
                     style={[
                       styles.phraseSaveButton,
@@ -616,7 +705,7 @@ export default function UserDashboard({
                         isSaved && { color: green },
                       ]}
                     >
-                      {isSaved ? 'Saved to Vocabulary' : 'Save Phrase'}
+                      {isSaved ? 'Saved' : 'Save'}
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -796,7 +885,7 @@ export default function UserDashboard({
               <View style={styles.matchedStateContainer}>
                 <View style={styles.matchedBadge}>
                   <Ionicons name="checkmark-circle" size={20} color={green} />
-                  <Text style={styles.matchedBadgeText}>Partner Found!</Text>
+                  <Text style={styles.matchedBadgeText}>Partner Found & Ready!</Text>
                 </View>
 
                 <View style={styles.partnerProfileCard}>
@@ -822,22 +911,28 @@ export default function UserDashboard({
                   </Text>
                 </View>
 
-                <View style={styles.noticeBox}>
-                  <Ionicons name="information-circle-outline" size={18} color={muted} />
-                  <Text style={styles.noticeText}>
-                    Audio calling uses Agora/WebRTC infrastructure (in dev preview). You can start instant messaging right now!
-                  </Text>
-                </View>
+                {/* Dual Options: Voice Call or Chat */}
+                <View style={{ width: '100%', gap: 10 }}>
+                  <TouchableOpacity
+                    style={styles.matchedActionButtonCall}
+                    onPress={() => handleStartCallWithPartner(matchedPartner)}
+                  >
+                    <Ionicons name="call" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                    <Text style={styles.matchedActionButtonText}>
+                      Start Live Audio Call
+                    </Text>
+                  </TouchableOpacity>
 
-                <TouchableOpacity
-                  style={styles.matchedActionButton}
-                  onPress={handleConnectToPartner}
-                >
-                  <Ionicons name="chatbubbles" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-                  <Text style={styles.matchedActionButtonText}>
-                    Start Chatting with {matchedPartner.name}
-                  </Text>
-                </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.matchedActionButton}
+                    onPress={handleConnectToPartner}
+                  >
+                    <Ionicons name="chatbubbles" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                    <Text style={styles.matchedActionButtonText}>
+                      Send Message in Chat
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
           </View>
@@ -845,7 +940,94 @@ export default function UserDashboard({
       </Modal>
 
       {/* ========================================================== */}
-      {/* MODAL 2: VOCABULARY GAME / QUIZ MODAL */}
+      {/* MODAL 2: LIVE IN-CALL VOICE INTERFACE */}
+      {/* ========================================================== */}
+      <Modal
+        visible={showVoiceCallModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowVoiceCallModal(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, styles.callModalCard]}>
+            <View style={styles.callTopHeader}>
+              <View style={styles.callLiveDot} />
+              <Text style={styles.callLiveStatus}>
+                {isMuted ? 'Muted' : 'Speaking · Live Voice'}
+              </Text>
+            </View>
+
+            <Text style={styles.callTimerText}>{formatCallTimer(callSeconds)}</Text>
+
+            <View style={styles.callAvatarContainer}>
+              <View style={styles.callAvatarPulseOuter}>
+                <View style={styles.callAvatarPulseInner}>
+                  <Text style={{ fontSize: 44 }}>👩🏻</Text>
+                </View>
+              </View>
+            </View>
+
+            <Text style={styles.callPartnerName}>
+              {activeCallPartner?.name || 'Speaking Partner'}
+            </Text>
+            <Text style={styles.callPartnerCountry}>
+              {activeCallPartner?.country || 'Global'} · {activeCallPartner?.level || 'Intermediate'} English
+            </Text>
+
+            {/* In-Call Discussion Prompt */}
+            <View style={styles.callTopicBox}>
+              <Text style={styles.callTopicTitle}>💡 Active Conversation Topic:</Text>
+              <Text style={styles.callTopicText}>
+                "Describe your hometown and the favorite food people eat there."
+              </Text>
+            </View>
+
+            {/* In-Call Audio Controls */}
+            <View style={styles.callControlsRow}>
+              {/* Mute Button */}
+              <TouchableOpacity
+                style={[styles.callControlCircle, isMuted && styles.callControlCircleActive]}
+                onPress={() => setIsMuted((prev) => !prev)}
+                accessibilityLabel="Toggle Microphone"
+              >
+                <Ionicons
+                  name={isMuted ? 'mic-off' : 'mic'}
+                  size={24}
+                  color={isMuted ? '#EF4444' : navy}
+                />
+                <Text style={styles.callControlLabel}>{isMuted ? 'Unmute' : 'Mute'}</Text>
+              </TouchableOpacity>
+
+              {/* End Call Button */}
+              <TouchableOpacity
+                style={styles.callEndButton}
+                onPress={() => setShowVoiceCallModal(false)}
+                accessibilityLabel="End Audio Call"
+              >
+                <Ionicons name="call" size={26} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
+                <Text style={styles.callEndLabel}>End</Text>
+              </TouchableOpacity>
+
+              {/* Speaker Button */}
+              <TouchableOpacity
+                style={[styles.callControlCircle, !isSpeakerOn && styles.callControlCircleActive]}
+                onPress={() => setIsSpeakerOn((prev) => !prev)}
+                accessibilityLabel="Toggle Loudspeaker"
+              >
+                <Ionicons
+                  name={isSpeakerOn ? 'volume-high' : 'volume-mute'}
+                  size={24}
+                  color={isSpeakerOn ? orange : navy}
+                />
+                <Text style={styles.callControlLabel}>{isSpeakerOn ? 'Speaker' : 'Earpiece'}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ========================================================== */}
+      {/* MODAL 3: VOCABULARY GAME / QUIZ MODAL */}
       {/* ========================================================== */}
       <Modal
         visible={showQuizModal}
@@ -949,7 +1131,7 @@ export default function UserDashboard({
       </Modal>
 
       {/* ========================================================== */}
-      {/* MODAL 3: NOTIFICATIONS MODAL */}
+      {/* MODAL 4: NOTIFICATIONS MODAL */}
       {/* ========================================================== */}
       <Modal
         visible={showNotificationsModal}
@@ -1009,7 +1191,7 @@ export default function UserDashboard({
       </Modal>
 
       {/* ========================================================== */}
-      {/* MODAL 4: SETTINGS & LOGOUT MODAL */}
+      {/* MODAL 5: SETTINGS & ACCOUNT SWITCHER MODAL */}
       {/* ========================================================== */}
       <Modal
         visible={showSettingsModal}
@@ -1030,9 +1212,42 @@ export default function UserDashboard({
               <Text style={{ fontSize: 32 }}>👨🏽‍💻</Text>
               <View style={{ marginLeft: 12 }}>
                 <Text style={styles.settingsUserName}>{user?.name || 'Pavan Nerkar'}</Text>
-                <Text style={styles.settingsUserEmail}>{user?.country || 'India'} · {user?.nativeLanguage} Native</Text>
+                <Text style={styles.settingsUserEmail}>
+                  {user?.country || 'India'} · {user?.nativeLanguage} Native
+                </Text>
               </View>
             </View>
+
+            {/* Multi-User Account Switcher for Testing / Evaluation */}
+            {allUsers && allUsers.length > 0 && onSwitchUser && (
+              <View style={styles.accountSwitcherBox}>
+                <Text style={styles.accountSwitcherTitle}>
+                  Switch Active Identity (Test Multi-User):
+                </Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                  {allUsers.map((u) => {
+                    const isCurrent = u.id === user?.id;
+                    return (
+                      <TouchableOpacity
+                        key={u.id}
+                        style={[
+                          styles.userPillButton,
+                          isCurrent && styles.userPillButtonActive,
+                        ]}
+                        onPress={() => {
+                          onSwitchUser(u.id);
+                          setShowSettingsModal(false);
+                        }}
+                      >
+                        <Text style={[styles.userPillText, isCurrent && { color: '#FFFFFF', fontWeight: '800' }]}>
+                          {u.name} ({u.country})
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+            )}
 
             <TouchableOpacity
               style={styles.settingsActionItem}
@@ -1470,9 +1685,10 @@ const styles = StyleSheet.create({
   },
   wotdMainRow: {
     flexDirection: 'row',
-    alignItems: 'baseline',
+    alignItems: 'center',
     gap: 10,
     marginBottom: 6,
+    flexWrap: 'wrap',
   },
   wotdWord: {
     fontSize: 24,
@@ -1483,6 +1699,27 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: orange,
     fontWeight: '600',
+  },
+  speakerPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: orangeLight,
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    marginLeft: 'auto',
+  },
+  speakerPillActive: {
+    backgroundColor: greenLight,
+    borderColor: green,
+  },
+  speakerPillText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: orange,
   },
   wotdMeaning: {
     fontSize: 13,
@@ -1630,14 +1867,38 @@ const styles = StyleSheet.create({
   },
   phraseFooterRow: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F3F4F6',
+  },
+  phraseAudioButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: orangeLight,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#FED7AA',
+  },
+  phraseAudioButtonActive: {
+    backgroundColor: greenLight,
+    borderColor: green,
+  },
+  phraseAudioText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: orange,
   },
   phraseSaveButton: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingVertical: 4,
-    paddingHorizontal: 8,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
   },
   phraseSaveButtonActive: {
     opacity: 0.9,
@@ -1869,7 +2130,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     borderRadius: 22,
     padding: 22,
-    maxHeight: '88%',
+    maxHeight: '90%',
   },
   modalHeader: {
     flexDirection: 'row',
@@ -1980,7 +2241,7 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 12,
     width: '100%',
-    marginBottom: 12,
+    marginBottom: 14,
     borderWidth: 1,
     borderColor: '#FED7AA',
   },
@@ -1995,21 +2256,14 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
     color: navy,
   },
-  noticeBox: {
+  matchedActionButtonCall: {
+    backgroundColor: green,
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 6,
-    backgroundColor: light,
-    padding: 10,
-    borderRadius: 10,
-    marginBottom: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
     width: '100%',
-  },
-  noticeText: {
-    fontSize: 11,
-    color: muted,
-    flex: 1,
-    lineHeight: 15,
+    paddingVertical: 14,
+    borderRadius: 24,
   },
   matchedActionButton: {
     backgroundColor: orange,
@@ -2023,6 +2277,136 @@ const styles = StyleSheet.create({
   matchedActionButtonText: {
     color: '#FFFFFF',
     fontSize: 15,
+    fontWeight: '700',
+  },
+
+  /* Live In-Call Voice Modal */
+  callModalCard: {
+    backgroundColor: '#111726',
+    alignItems: 'center',
+    paddingVertical: 28,
+  },
+  callTopHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginBottom: 8,
+  },
+  callLiveDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: green,
+  },
+  callLiveStatus: {
+    fontSize: 11,
+    color: '#D1D5DB',
+    fontWeight: '700',
+  },
+  callTimerText: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    letterSpacing: 1,
+    marginBottom: 16,
+  },
+  callAvatarContainer: {
+    marginVertical: 10,
+  },
+  callAvatarPulseOuter: {
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    backgroundColor: 'rgba(255, 104, 71, 0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  callAvatarPulseInner: {
+    width: 86,
+    height: 86,
+    borderRadius: 43,
+    backgroundColor: '#FFE0D3',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  callPartnerName: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: '#FFFFFF',
+    marginTop: 8,
+  },
+  callPartnerCountry: {
+    fontSize: 12,
+    color: '#9CA3AF',
+    marginTop: 2,
+    marginBottom: 16,
+  },
+  callTopicBox: {
+    backgroundColor: 'rgba(255, 255, 255, 0.06)',
+    borderRadius: 14,
+    padding: 14,
+    width: '100%',
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  callTopicTitle: {
+    fontSize: 11,
+    color: orange,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  callTopicText: {
+    fontSize: 13,
+    color: '#E5E7EB',
+    fontStyle: 'italic',
+    lineHeight: 18,
+  },
+  callControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-around',
+    width: '100%',
+    paddingHorizontal: 10,
+  },
+  callControlCircle: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    justifyContent: 'center',
+  },
+  callControlCircleActive: {
+    backgroundColor: '#FEE2E2',
+  },
+  callControlLabel: {
+    fontSize: 10,
+    color: '#9CA3AF',
+    marginTop: 4,
+    fontWeight: '600',
+  },
+  callEndButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#EF4444',
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    shadowColor: '#EF4444',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  callEndLabel: {
+    fontSize: 10,
+    color: '#FFFFFF',
+    marginTop: 2,
     fontWeight: '700',
   },
 
@@ -2185,7 +2569,7 @@ const styles = StyleSheet.create({
     backgroundColor: light,
     padding: 14,
     borderRadius: 14,
-    marginBottom: 16,
+    marginBottom: 12,
   },
   settingsUserName: {
     fontSize: 15,
@@ -2197,10 +2581,41 @@ const styles = StyleSheet.create({
     color: muted,
     marginTop: 2,
   },
+  accountSwitcherBox: {
+    backgroundColor: light,
+    padding: 12,
+    borderRadius: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: border,
+  },
+  accountSwitcherTitle: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: navy,
+  },
+  userPillButton: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: border,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+    marginRight: 6,
+  },
+  userPillButtonActive: {
+    backgroundColor: orange,
+    borderColor: orange,
+  },
+  userPillText: {
+    fontSize: 11,
+    color: navy,
+    fontWeight: '600',
+  },
   settingsActionItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 14,
+    paddingVertical: 13,
     borderBottomWidth: 1,
     borderBottomColor: '#F3F4F6',
     gap: 12,
@@ -2212,4 +2627,3 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 });
-

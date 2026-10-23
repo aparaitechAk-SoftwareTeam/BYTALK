@@ -6,46 +6,841 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+
+import { hashPassword, verifyPassword, signJwt, requireAuth, optionalAuth } from './auth.js';
+import { COMMON_PHRASES, WORD_GAME_BANK, DAILY_CHALLENGE, evaluateGameAttempt } from './learning.js';
+import { setupSignaling } from './signaling.js';
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dbFile = path.join(root, 'data', 'store.json');
 fs.mkdirSync(path.dirname(dbFile), { recursive: true });
+
 const seed = {
   users: [
-    {id:'u1', name:'Pavan Nerkar', country:'India', nativeLanguage:'Hindi', learningLanguage:'English', level:'Intermediate', online:true, streak:12, minutes:150, words:28},
-    {id:'u2', name:'Yuki', country:'Japan', nativeLanguage:'Japanese', learningLanguage:'English', level:'Intermediate', online:true},
-    {id:'u3', name:'Lucas', country:'Brazil', nativeLanguage:'Portuguese', learningLanguage:'English', level:'Beginner', online:true},
-    {id:'u4', name:'Minji', country:'South Korea', nativeLanguage:'Korean', learningLanguage:'English', level:'Intermediate', online:true},
-    {id:'u5', name:'Carlos', country:'Mexico', nativeLanguage:'Spanish', learningLanguage:'English', level:'Intermediate', online:true},
-    {id:'u6', name:'Aditi', country:'India', nativeLanguage:'Hindi', learningLanguage:'English', level:'Beginner', online:true}
+    {
+      id: 'u1',
+      name: 'Pavan Nerkar',
+      alias: 'PavanN',
+      email: 'pavan@bytalk.app',
+      country: 'India',
+      nativeLanguage: 'Hindi',
+      learningLanguage: 'English',
+      level: 'Intermediate',
+      online: true,
+      streak: 12,
+      minutes: 150,
+      words: 28,
+      savedPhrases: ['phr_work_1', 'phr_int_1'],
+      blockedUsers: [],
+      referralCode: 'BYTALK-PAVAN',
+      referredCount: 3
+    },
+    { id: 'u2', name: 'Yuki', alias: 'YukiTokyo', email: 'yuki@bytalk.app', country: 'Japan', nativeLanguage: 'Japanese', learningLanguage: 'English', level: 'Intermediate', online: true, minutes: 80, words: 15, streak: 5, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-YUKI', referredCount: 1 },
+    { id: 'u3', name: 'Lucas', alias: 'LucasRio', email: 'lucas@bytalk.app', country: 'Brazil', nativeLanguage: 'Portuguese', learningLanguage: 'English', level: 'Beginner', online: true, minutes: 45, words: 9, streak: 3, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-LUCAS', referredCount: 0 },
+    { id: 'u4', name: 'Minji', alias: 'MinjiSeoul', email: 'minji@bytalk.app', country: 'South Korea', nativeLanguage: 'Korean', learningLanguage: 'English', level: 'Intermediate', online: true, minutes: 110, words: 22, streak: 8, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-MINJI', referredCount: 2 },
+    { id: 'u5', name: 'Carlos', alias: 'CarlosMex', email: 'carlos@bytalk.app', country: 'Mexico', nativeLanguage: 'Spanish', learningLanguage: 'English', level: 'Intermediate', online: true, minutes: 60, words: 14, streak: 4, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-CARLOS', referredCount: 0 },
+    { id: 'u6', name: 'Aditi', alias: 'Aditi_In', email: 'aditi@bytalk.app', country: 'India', nativeLanguage: 'Hindi', learningLanguage: 'English', level: 'Beginner', online: true, minutes: 30, words: 8, streak: 2, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-ADITI', referredCount: 0 }
   ],
   rooms: [
-    {id:'r1', name:'Everyday English', topic:'English', level:'Beginner - Intermediate', listeners:24, joined:0},
-    {id:'r2', name:'Travel stories', topic:'Travel', level:'Intermediate - Advanced', listeners:18, joined:0},
-    {id:'r3', name:'Movies & culture', topic:'Culture', level:'All levels', listeners:32, joined:0},
-    {id:'r4', name:'Language exchange', topic:'Study', level:'Beginner - Intermediate', listeners:12, joined:0}
-  ], messages:[
-    {id:'m1',from:'u2',to:'u1',text:'Hi Pavan! 👋 How is your day going?',at:new Date().toISOString()},
-    {id:'m2',from:'u1',to:'u2',text:'Hi! My day is good. I am learning English!',at:new Date().toISOString()}
-  ], vocabulary:[{id:'v1',userId:'u1',word:'conversation',category:'Conversation'}],reports:[]
+    { id: 'r1', name: 'Everyday English', topic: 'Daily English', level: 'Beginner - Intermediate', listeners: 24, capacity: 50, speakers: ['u1'], isLive: true, joined: 0 },
+    { id: 'r2', name: 'Job Interview Practice', topic: 'Interviews', level: 'Intermediate - Advanced', listeners: 18, capacity: 30, speakers: ['u2'], isLive: true, joined: 0 },
+    { id: 'r3', name: 'IELTS Speaking Prep', topic: 'IELTS Practice', level: 'All levels', listeners: 32, capacity: 50, speakers: ['u4'], isLive: true, joined: 0 },
+    { id: 'r4', name: 'Travel & Free Conversation', topic: 'Travel', level: 'Beginner - Intermediate', listeners: 12, capacity: 40, speakers: [], isLive: true, joined: 0 }
+  ],
+  messages: [
+    { id: 'm1', from: 'u2', to: 'u1', text: 'Hi Pavan! 👋 How is your day going?', at: new Date().toISOString() },
+    { id: 'm2', from: 'u1', to: 'u2', text: 'Hi! My day is good. I am learning English!', at: new Date().toISOString() }
+  ],
+  vocabulary: [{ id: 'v1', userId: 'u1', word: 'conversation', category: 'Conversation' }],
+  reports: [],
+  blocks: [],
+  auditLogs: []
 };
+
 let store;
-try { store = JSON.parse(fs.readFileSync(dbFile,'utf8')); } catch { store = seed; fs.writeFileSync(dbFile,JSON.stringify(store,null,2)); }
-const save = () => fs.writeFileSync(dbFile,JSON.stringify(store,null,2));
-const app=express(); app.use(cors());app.use(express.json({limit:'128kb'}));
-const httpServer=createServer(app); const io=new Server(httpServer,{cors:{origin:'*'}});
-app.get('/api/health',(req,res)=>res.json({ok:true,service:'BYTALK API'}));
-app.get('/api/users',(req,res)=>res.json(store.users));
-app.get('/api/partners',(req,res)=>{const q=String(req.query.q||'').toLowerCase();res.json(store.users.filter(u=>u.id!=='u1'&&[u.name,u.country,u.nativeLanguage,u.level].some(x=>String(x).toLowerCase().includes(q))));});
-app.post('/api/onboard',(req,res)=>{const {name,country,nativeLanguage,learningLanguage,level}=req.body; const me=store.users.find(u=>u.id==='u1');for(const [k,v] of Object.entries({name,country,nativeLanguage,learningLanguage,level})) if(typeof v==='string'&&v.trim())me[k]=v.trim().slice(0,80);save();res.json(me);});
-app.get('/api/rooms',(req,res)=>res.json(store.rooms));
-app.post('/api/rooms/:id/join',(req,res)=>{const room=store.rooms.find(r=>r.id===req.params.id);if(!room)return res.status(404).json({error:'Room not found'});room.joined++;save();io.emit('rooms:changed',store.rooms);res.json(room);});
-app.get('/api/messages/:a/:b',(req,res)=>res.json(store.messages.filter(m=>(m.from===req.params.a&&m.to===req.params.b)||(m.from===req.params.b&&m.to===req.params.a))));
-app.post('/api/messages',(req,res)=>{const {from,to,text}=req.body;if(!store.users.some(u=>u.id===from)||!store.users.some(u=>u.id===to)||typeof text!=='string'||!text.trim()||text.length>1500)return res.status(400).json({error:'Invalid message'});const msg={id:crypto.randomUUID(),from,to,text:text.trim(),at:new Date().toISOString()};store.messages.push(msg);save();io.emit('message:new',msg);res.status(201).json(msg);});
-app.get('/api/vocabulary/:userId',(req,res)=>res.json(store.vocabulary.filter(v=>v.userId===req.params.userId)));
-app.post('/api/vocabulary',(req,res)=>{const {userId,word,category}=req.body;if(typeof word!=='string'||!word.trim()||word.length>100)return res.status(400).json({error:'Invalid word'});const item={id:crypto.randomUUID(),userId:userId||'u1',word:word.trim(),category:category||'Conversation'};store.vocabulary.push(item);const u=store.users.find(x=>x.id===item.userId);if(u)u.words=(u.words||0)+1;save();res.status(201).json(item);});
-app.get('/api/stats',(req,res)=>res.json({users:store.users.length,rooms:store.rooms.length,messages:store.messages.length,reports:store.reports.filter(r=>r.status==='open').length,activeUsers:store.users.filter(x=>x.online).length}));
-app.get('/api/reports',(req,res)=>res.json(store.reports));
-app.post('/api/reports',(req,res)=>{const {reason,reportedUserId}=req.body;if(typeof reason!=='string'||!reason.trim())return res.status(400).json({error:'Reason required'});const report={id:crypto.randomUUID(),reason:reason.slice(0,500),reportedUserId:reportedUserId||null,status:'open',at:new Date().toISOString()};store.reports.push(report);save();res.status(201).json(report);});
-app.patch('/api/reports/:id',(req,res)=>{const report=store.reports.find(r=>r.id===req.params.id);if(!report)return res.status(404).json({error:'Not found'});if(!['open','resolved'].includes(req.body.status))return res.status(400).json({error:'Invalid status'});report.status=req.body.status;save();res.json(report);});
-io.on('connection',socket=>{socket.on('ping:app',()=>socket.emit('pong:app'));});
-const port=Number(process.env.PORT||4000);httpServer.listen(port,'0.0.0.0',()=>console.log(`BYTALK backend running on http://localhost:${port}`));
+try {
+  store = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
+} catch {
+  store = seed;
+  fs.writeFileSync(dbFile, JSON.stringify(store, null, 2));
+}
+
+// Data normalization to ensure all fields from Section 19 exist
+if (!store.blocks) store.blocks = [];
+if (!store.auditLogs) store.auditLogs = [];
+store.users.forEach((u) => {
+  if (!u.savedPhrases) u.savedPhrases = [];
+  if (!u.blockedUsers) u.blockedUsers = [];
+  if (!u.alias) u.alias = u.name ? u.name.split(' ')[0] : 'Learner';
+  if (!u.referralCode) u.referralCode = `BYTALK-${(u.name || 'USER').toUpperCase().slice(0, 5)}-${Math.floor(100 + Math.random() * 900)}`;
+  if (u.referredCount === undefined) u.referredCount = 0;
+});
+
+const save = () => fs.writeFileSync(dbFile, JSON.stringify(store, null, 2));
+
+const logAuditEvent = (actor, eventType, target) => {
+  store.auditLogs.push({
+    id: crypto.randomUUID(),
+    actor: actor || 'system',
+    eventType,
+    target: target || null,
+    timestamp: new Date().toISOString()
+  });
+  save();
+};
+
+const app = express();
+const corsOrigin = process.env.CORS_ORIGIN || '*';
+app.use(cors({ origin: corsOrigin, credentials: true }));
+app.use(express.json({ limit: '128kb' }));
+
+// Request logging middleware for visual confirmation of client connections
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(`[HTTP] ${req.method} ${req.originalUrl} - ${res.statusCode} (${duration}ms)`);
+  });
+  next();
+});
+
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin: corsOrigin,
+    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+    credentials: true
+  }
+});
+
+// Root welcome route for quick health inspection
+app.get('/', (req, res) => {
+  res.json({
+    service: 'BYTALK Backend API',
+    status: 'online',
+    version: '1.0.0',
+    documentation: 'Aparaitech Software BYTALK Specification',
+    endpoints: {
+      health: '/api/health',
+      stats: '/api/stats',
+      users: '/api/users',
+      dashboard: '/api/dashboard/u1',
+      rooms: '/rooms',
+      phrases: '/phrases',
+      games: '/games/questions',
+      dailyQuiz: '/api/quiz/daily'
+    }
+  });
+});
+
+// ==========================================
+// 1. ORIGINAL CORE API ENDPOINTS (PRESERVED)
+// ==========================================
+
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'BYTALK API' }));
+
+app.get('/api/users', (req, res) => {
+  const safeUsers = store.users.map((u) => {
+    const { passwordHash, ...safe } = u;
+    return safe;
+  });
+  res.json(safeUsers);
+});
+
+app.get('/api/partners', (req, res) => {
+  const q = String(req.query.q || '').toLowerCase();
+  res.json(
+    store.users.filter(
+      (u) =>
+        u.id !== 'u1' &&
+        [u.name, u.alias, u.country, u.nativeLanguage, u.level].some((x) =>
+          String(x || '').toLowerCase().includes(q)
+        )
+    )
+  );
+});
+
+app.post('/api/onboard', (req, res) => {
+  const { name, country, nativeLanguage, learningLanguage, level } = req.body;
+  const me = store.users.find((u) => u.id === 'u1');
+  for (const [k, v] of Object.entries({ name, country, nativeLanguage, learningLanguage, level })) {
+    if (typeof v === 'string' && v.trim()) me[k] = v.trim().slice(0, 80);
+  }
+  save();
+  res.json(me);
+});
+
+app.get(['/api/rooms', '/rooms'], (req, res) => res.json(store.rooms));
+
+app.post(['/api/rooms/:id/join', '/rooms/:id/join'], (req, res) => {
+  const room = store.rooms.find((r) => r.id === req.params.id);
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+  room.joined = (room.joined || 0) + 1;
+  room.listeners = (room.listeners || 0) + 1;
+  save();
+  io.emit('rooms:changed', store.rooms);
+  res.json(room);
+});
+
+app.post(['/api/rooms/:id/leave', '/rooms/:id/leave'], (req, res) => {
+  const room = store.rooms.find((r) => r.id === req.params.id);
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+  if (room.listeners > 0) room.listeners -= 1;
+  save();
+  io.emit('rooms:changed', store.rooms);
+  res.json({ message: 'Left room successfully.', room });
+});
+
+app.get('/api/messages/:a/:b', (req, res) =>
+  res.json(
+    store.messages.filter(
+      (m) =>
+        (m.from === req.params.a && m.to === req.params.b) ||
+        (m.from === req.params.b && m.to === req.params.a)
+    )
+  )
+);
+
+app.post('/api/messages', (req, res) => {
+  const { from, to, text } = req.body;
+  if (
+    !store.users.some((u) => u.id === from) ||
+    !store.users.some((u) => u.id === to) ||
+    typeof text !== 'string' ||
+    !text.trim() ||
+    text.length > 1500
+  )
+    return res.status(400).json({ error: 'Invalid message' });
+
+  const msg = { id: crypto.randomUUID(), from, to, text: text.trim(), at: new Date().toISOString() };
+  store.messages.push(msg);
+  save();
+  io.emit('message:new', msg);
+  res.status(201).json(msg);
+});
+
+app.get('/api/vocabulary/:userId', (req, res) =>
+  res.json(store.vocabulary.filter((v) => v.userId === req.params.userId))
+);
+
+app.post('/api/vocabulary', (req, res) => {
+  const { userId, word, category } = req.body;
+  if (typeof word !== 'string' || !word.trim() || word.length > 100)
+    return res.status(400).json({ error: 'Invalid word' });
+
+  const item = {
+    id: crypto.randomUUID(),
+    userId: userId || 'u1',
+    word: word.trim(),
+    category: category || 'Conversation'
+  };
+  store.vocabulary.push(item);
+  const u = store.users.find((x) => x.id === item.userId);
+  if (u) u.words = (u.words || 0) + 1;
+  save();
+  res.status(201).json(item);
+});
+
+app.get('/api/stats', (req, res) =>
+  res.json({
+    users: store.users.length,
+    rooms: store.rooms.length,
+    messages: store.messages.length,
+    reports: store.reports.filter((r) => r.status === 'open').length,
+    activeUsers: store.users.filter((x) => x.online).length,
+    totalBlocks: store.blocks.length
+  })
+);
+
+// In-memory rate limiting tracker for report submissions (Spam & Abuse Prevention)
+const recentReportsTracker = new Map(); // reporterId -> [timestamp1, timestamp2, ...]
+
+app.get('/api/reports', (req, res) => res.json(store.reports));
+
+app.post(['/api/reports', '/reports'], optionalAuth(store), (req, res) => {
+  const reporterId = req.user?.id || req.body.reporterId || 'anonymous_user';
+  const { reason, reportedUserId, sessionId } = req.body;
+
+  if (typeof reason !== 'string' || !reason.trim() || reason.trim().length < 5) {
+    return res.status(400).json({ error: 'A specific, descriptive reason (minimum 5 characters) is required for safety reports.' });
+  }
+
+  // 1. Prevent Self-Reporting
+  if (reportedUserId && reportedUserId === reporterId) {
+    return res.status(400).json({ error: 'You cannot submit a safety report against your own account.' });
+  }
+
+  // 2. Anti-Spam Throttling & Rate Limiting (Section 12: "Apply spam prevention, request throttling")
+  const now = Date.now();
+  const windowMs = 10 * 60 * 1000; // 10-minute sliding window
+  const maxReportsPerWindow = 3;
+
+  const userReportTimestamps = (recentReportsTracker.get(reporterId) || []).filter(
+    (t) => now - t < windowMs
+  );
+
+  if (userReportTimestamps.length >= maxReportsPerWindow) {
+    return res.status(429).json({
+      error: 'Abuse protection: You have exceeded the maximum report submissions allowed in a 10-minute window. Please wait before submitting more reports.'
+    });
+  }
+
+  userReportTimestamps.push(now);
+  recentReportsTracker.set(reporterId, userReportTimestamps);
+
+  // 3. Prevent Duplicate Harassment Reports against the same user
+  const duplicateOpenReport = store.reports.find(
+    (r) => r.reporterId === reporterId && r.reportedUserId === reportedUserId && r.status === 'open'
+  );
+  if (duplicateOpenReport) {
+    return res.status(409).json({
+      error: 'A report against this user is already open and currently under moderation review.'
+    });
+  }
+
+  // 4. Interaction Verification (Context Check)
+  // Check if reporter and reported user actually had shared interactions (messages or sessions)
+  const hasSharedMessages = reportedUserId
+    ? store.messages.some(
+        (m) =>
+          (m.from === reporterId && m.to === reportedUserId) ||
+          (m.from === reportedUserId && m.to === reporterId)
+      )
+    : false;
+
+  const verificationStatus = (sessionId || hasSharedMessages) ? 'context_verified' : 'unverified_interaction';
+
+  // 5. Check Reporter Reputation (Section 12: "Limits on abusive behavior")
+  const reporter = store.users.find((u) => u.id === reporterId);
+  const falseReportCount = reporter?.falseReportCount || 0;
+  const isHighRiskReporter = falseReportCount >= 3;
+
+  const report = {
+    id: crypto.randomUUID(),
+    reporterId,
+    reportedUserId: reportedUserId || null,
+    sessionId: sessionId || null,
+    reason: reason.trim().slice(0, 500),
+    verificationStatus, // Flag whether direct interaction evidence exists
+    reporterCredibility: isHighRiskReporter ? 'flagged_for_false_reports' : 'standard',
+    status: 'open',
+    at: new Date().toISOString()
+  };
+
+  store.reports.push(report);
+  logAuditEvent(reporterId, 'REPORT_FILED', reportedUserId);
+  save();
+
+  res.status(201).json({
+    message: 'Report received and queued for moderator review. Innocent users are never penalized without human verification.',
+    report
+  });
+});
+
+app.patch('/api/reports/:id', (req, res) => {
+  const report = store.reports.find((r) => r.id === req.params.id);
+  if (!report) return res.status(404).json({ error: 'Report not found' });
+
+  const validStatuses = ['open', 'resolved', 'dismissed_as_false'];
+  if (!validStatuses.includes(req.body.status)) {
+    return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+  }
+
+  report.status = req.body.status;
+  report.reviewedAt = new Date().toISOString();
+  report.moderatorNotes = req.body.moderatorNotes || null;
+
+  // If dismissed as false / malicious report, penalize the malicious reporter
+  if (req.body.status === 'dismissed_as_false' && report.reporterId) {
+    const maliciousReporter = store.users.find((u) => u.id === report.reporterId);
+    if (maliciousReporter) {
+      maliciousReporter.falseReportCount = (maliciousReporter.falseReportCount || 0) + 1;
+      logAuditEvent('moderator', 'REPORTER_PENALIZED_FOR_FALSE_REPORT', report.reporterId);
+    }
+  }
+
+  logAuditEvent('moderator', 'REPORT_STATUS_UPDATED', report.id);
+  save();
+  res.json({ message: 'Report updated successfully.', report });
+});
+
+// ===============================================================
+// 2. USER AUTHENTICATION & SESSIONS (Section 5, 19, 20)
+// ===============================================================
+
+// Create user session / Register (POST /auth/register and POST /api/auth/register)
+app.post(['/auth/register', '/api/auth/register'], (req, res) => {
+  const { name, alias, email, password, country, nativeLanguage, learningLanguage, level } = req.body;
+
+  if (!name || typeof name !== 'string' || name.trim().length < 2) {
+    return res.status(400).json({ error: 'Display name is required (min 2 chars).' });
+  }
+
+  if (!password || typeof password !== 'string' || password.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+  }
+
+  const normalizedEmail = (email || `${name.toLowerCase().replace(/\s+/g, '')}@bytalk.app`).toLowerCase().trim();
+
+  if (store.users.some((u) => u.email && u.email.toLowerCase() === normalizedEmail)) {
+    return res.status(409).json({ error: 'An account with this email address already exists.' });
+  }
+
+  const userId = `u_${crypto.randomBytes(6).toString('hex')}`;
+  const newUser = {
+    id: userId,
+    name: name.trim().slice(0, 80),
+    alias: alias ? alias.trim().slice(0, 40) : name.trim().split(' ')[0],
+    email: normalizedEmail,
+    passwordHash: hashPassword(password),
+    country: country?.trim() || 'Global',
+    nativeLanguage: nativeLanguage?.trim() || 'English',
+    learningLanguage: learningLanguage?.trim() || 'English',
+    level: level?.trim() || 'Intermediate',
+    online: true,
+    streak: 1,
+    minutes: 0,
+    words: 0,
+    quizzesCompleted: 0,
+    savedPhrases: [],
+    blockedUsers: [],
+    referralCode: `BYTALK-${name.trim().toUpperCase().slice(0, 5)}-${Math.floor(100 + Math.random() * 900)}`,
+    referredCount: 0,
+    createdAt: new Date().toISOString()
+  };
+
+  store.users.push(newUser);
+  logAuditEvent(newUser.id, 'USER_REGISTERED', newUser.id);
+  save();
+
+  const token = signJwt({ userId: newUser.id, name: newUser.name, email: newUser.email });
+  const { passwordHash, ...safeUser } = newUser;
+
+  res.status(201).json({
+    message: 'User registered successfully.',
+    token,
+    user: safeUser
+  });
+});
+
+// Create user session / Login (POST /auth/login and POST /api/auth/login)
+app.post(['/auth/login', '/api/auth/login'], (req, res) => {
+  const { identifier, email, password } = req.body;
+  const loginKey = String(identifier || email || '').toLowerCase().trim();
+
+  if (!loginKey) {
+    return res.status(400).json({ error: 'Email, username, or ID is required to login.' });
+  }
+
+  const user = store.users.find(
+    (u) =>
+      u.id === loginKey ||
+      (u.email && u.email.toLowerCase() === loginKey) ||
+      (u.name && u.name.toLowerCase() === loginKey) ||
+      (u.alias && u.alias.toLowerCase() === loginKey)
+  );
+
+  if (!user) {
+    return res.status(401).json({ error: 'No user account found matching those credentials.' });
+  }
+
+  if (user.passwordHash) {
+    if (!password || !verifyPassword(password, user.passwordHash)) {
+      return res.status(401).json({ error: 'Invalid password.' });
+    }
+  } else if (password && typeof password === 'string' && password.length >= 4) {
+    user.passwordHash = hashPassword(password);
+    save();
+  }
+
+  user.online = true;
+  save();
+
+  const token = signJwt({ userId: user.id, name: user.name, email: user.email || '' });
+  const { passwordHash, ...safeUser } = user;
+
+  res.json({
+    message: 'Login successful.',
+    token,
+    user: safeUser
+  });
+});
+
+// User Profile (GET /me, PATCH /me, DELETE /me per Section 16 & 20)
+app.get(['/me', '/api/me'], optionalAuth(store), (req, res) => {
+  const user = req.user || store.users[0];
+  const { passwordHash, ...safeUser } = user;
+  res.json({ user: safeUser });
+});
+
+app.patch(['/me', '/api/me'], optionalAuth(store), (req, res) => {
+  const user = req.user || store.users[0];
+  const allowed = ['alias', 'name', 'country', 'level', 'nativeLanguage', 'learningLanguage', 'goals', 'interests', 'avatar'];
+
+  allowed.forEach((field) => {
+    if (req.body[field] !== undefined) {
+      user[field] = req.body[field];
+    }
+  });
+
+  save();
+  const { passwordHash, ...safeUser } = user;
+  res.json({ message: 'Profile updated successfully.', user: safeUser });
+});
+
+// Privacy Account Deletion (Section 16: "Expose account deletion, data export/request")
+app.delete(['/me', '/api/me'], optionalAuth(store), (req, res) => {
+  const user = req.user || store.users.find((u) => u.id === req.body.userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  store.users = store.users.filter((u) => u.id !== user.id);
+  store.messages = store.messages.filter((m) => m.from !== user.id && m.to !== user.id);
+  store.vocabulary = store.vocabulary.filter((v) => v.userId !== user.id);
+  logAuditEvent(user.id, 'ACCOUNT_DELETED', user.id);
+  save();
+
+  res.json({ message: 'Account and associated personal data deleted cleanly.' });
+});
+
+// ===============================================================
+// 3. RANDOM MATCHMAKING & SESSION APIS (Section 7, 20)
+// ===============================================================
+
+// REST Match Request (POST /matches, DELETE /matches/:id)
+const pendingMatchRequests = new Map();
+
+app.post(['/matches', '/api/matches'], optionalAuth(store), (req, res) => {
+  const user = req.user || store.users.find((u) => u.id === req.body.userId) || store.users[0];
+  const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+  // Find another pending match request not blocked
+  let matchedEntry = null;
+  for (const [otherReqId, entry] of pendingMatchRequests.entries()) {
+    if (entry.userId !== user.id && !(user.blockedUsers || []).includes(entry.userId)) {
+      matchedEntry = { otherReqId, ...entry };
+      break;
+    }
+  }
+
+  if (matchedEntry) {
+    pendingMatchRequests.delete(matchedEntry.otherReqId);
+    const sessionId = `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const partnerUser = store.users.find((u) => u.id === matchedEntry.userId);
+
+    res.json({
+      status: 'matched',
+      sessionId,
+      partner: {
+        id: partnerUser?.id || matchedEntry.userId,
+        alias: partnerUser?.alias || partnerUser?.name || 'Partner',
+        country: partnerUser?.country || 'Global',
+        level: partnerUser?.level || 'Intermediate'
+      }
+    });
+  } else {
+    pendingMatchRequests.set(requestId, {
+      userId: user.id,
+      timestamp: Date.now()
+    });
+
+    res.status(202).json({
+      status: 'queued',
+      requestId,
+      message: 'Entered random voice matching queue.'
+    });
+  }
+});
+
+app.delete(['/matches/:id', '/api/matches/:id'], (req, res) => {
+  pendingMatchRequests.delete(req.params.id);
+  res.json({ message: 'Match request cancelled or ended successfully.' });
+});
+
+// ===============================================================
+// 4. WORD GAME & VOCABULARY CONTENT (Section 10, 20)
+// ===============================================================
+
+// Get game questions across all 5 types (GET /games/questions)
+app.get(['/games/questions', '/api/games/questions'], (req, res) => {
+  const { type } = req.query;
+  let questions = WORD_GAME_BANK;
+
+  if (type && typeof type === 'string' && type.toLowerCase() !== 'all') {
+    questions = questions.filter((q) => q.type.toLowerCase() === type.toLowerCase());
+  }
+
+  // Client view: sanitize by withholding direct answer index
+  const clientQuestions = questions.map((q) => ({
+    id: q.id,
+    type: q.type,
+    prompt: q.prompt,
+    options: q.options,
+    difficulty: q.difficulty
+  }));
+
+  res.json({
+    total: clientQuestions.length,
+    gameTypes: ['Word Meaning', 'Fill in the Blank', 'Synonym / Antonym', 'Word Formation', 'Daily Challenge'],
+    questions: clientQuestions
+  });
+});
+
+// Record user game attempt & evaluate score (POST /games/attempts)
+app.post(['/games/attempts', '/api/games/attempts'], optionalAuth(store), (req, res) => {
+  const user = req.user || store.users.find((u) => u.id === req.body.userId) || store.users[0];
+  const { answers } = req.body;
+
+  const result = evaluateGameAttempt(user, answers || {});
+  save();
+
+  res.json({
+    attemptId: crypto.randomUUID(),
+    userId: user.id,
+    ...result
+  });
+});
+
+// Daily Challenge shortcut
+app.get(['/api/quiz/daily', '/quiz/daily'], (req, res) => {
+  res.json({
+    challengeId: DAILY_CHALLENGE.id,
+    date: DAILY_CHALLENGE.date,
+    wordOfTheDay: DAILY_CHALLENGE.wordOfTheDay,
+    theme: DAILY_CHALLENGE.theme,
+    questions: DAILY_CHALLENGE.questions.map((q) => ({
+      id: q.id,
+      type: q.type,
+      prompt: q.prompt,
+      options: q.options
+    }))
+  });
+});
+
+// ===============================================================
+// 5. COMMON PHRASES & FAVORITES (Section 11, 20)
+// ===============================================================
+
+// Fetch phrase library (GET /phrases)
+app.get(['/phrases', '/api/phrases'], (req, res) => {
+  const { category, search } = req.query;
+  let phrases = COMMON_PHRASES;
+
+  if (category && typeof category === 'string' && category.toLowerCase() !== 'all') {
+    phrases = phrases.filter((p) => p.category.toLowerCase() === category.toLowerCase());
+  }
+
+  if (search && typeof search === 'string' && search.trim()) {
+    const q = search.toLowerCase().trim();
+    phrases = phrases.filter(
+      (p) =>
+        p.phrase.toLowerCase().includes(q) ||
+        p.meaning.toLowerCase().includes(q) ||
+        p.example.toLowerCase().includes(q)
+    );
+  }
+
+  const categories = ['all', 'greetings', 'introductions', 'shopping', 'travel', 'work', 'interviews', 'education', 'everyday conversation'];
+
+  res.json({
+    total: phrases.length,
+    categories,
+    phrases
+  });
+});
+
+// Save favourite phrase (POST /phrases/:id/favourite and POST /phrases/bookmark)
+app.post(['/phrases/:id/favourite', '/api/phrases/:id/favourite', '/api/phrases/bookmark'], optionalAuth(store), (req, res) => {
+  const phraseId = req.params.id || req.body.phraseId;
+  const user = req.user || store.users.find((u) => u.id === req.body.userId) || store.users[0];
+
+  if (!user.savedPhrases) user.savedPhrases = [];
+
+  const exists = user.savedPhrases.includes(phraseId);
+  if (exists) {
+    user.savedPhrases = user.savedPhrases.filter((id) => id !== phraseId);
+  } else {
+    user.savedPhrases.push(phraseId);
+  }
+
+  save();
+  res.json({
+    phraseId,
+    favourited: !exists,
+    favourites: user.savedPhrases
+  });
+});
+
+// Get user's saved phrases
+app.get(['/phrases/favourites/:userId', '/api/phrases/favourites/:userId'], (req, res) => {
+  const user = store.users.find((u) => u.id === req.params.userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const favList = COMMON_PHRASES.filter((p) => (user.savedPhrases || []).includes(p.id));
+  res.json({ total: favList.length, favourites: favList });
+});
+
+// ===============================================================
+// 6. BLOCKING & SAFETY CONTROLS (Section 12, 20)
+// ===============================================================
+
+// Block a user (POST /blocks and POST /api/blocks)
+app.post(['/blocks', '/api/blocks'], optionalAuth(store), (req, res) => {
+  const user = req.user || store.users.find((u) => u.id === req.body.userId) || store.users[0];
+  const { targetUserId, reason } = req.body;
+
+  if (!targetUserId) {
+    return res.status(400).json({ error: 'targetUserId is required' });
+  }
+
+  if (!user.blockedUsers) user.blockedUsers = [];
+  if (!user.blockedUsers.includes(targetUserId)) {
+    user.blockedUsers.push(targetUserId);
+  }
+
+  const blockRecord = {
+    id: crypto.randomUUID(),
+    blockerId: user.id,
+    blockedId: targetUserId,
+    reason: reason || 'Inappropriate interaction',
+    timestamp: new Date().toISOString()
+  };
+  store.blocks.push(blockRecord);
+  logAuditEvent(user.id, 'USER_BLOCKED', targetUserId);
+  save();
+
+  res.status(201).json({
+    message: 'User blocked successfully. You will not be rematched with this account.',
+    blockRecord
+  });
+});
+
+// Get block list
+app.get(['/blocks/:userId', '/api/blocks/:userId'], (req, res) => {
+  const user = store.users.find((u) => u.id === req.params.userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  res.json({ blockedUsers: user.blockedUsers || [] });
+});
+
+// Unblock a user
+app.delete(['/blocks/:userId/:targetId', '/api/blocks/:userId/:targetId'], (req, res) => {
+  const user = store.users.find((u) => u.id === req.params.userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  user.blockedUsers = (user.blockedUsers || []).filter((id) => id !== req.params.targetId);
+  store.blocks = store.blocks.filter((b) => !(b.blockerId === user.id && b.blockedId === req.params.targetId));
+  save();
+
+  res.json({ message: 'User unblocked successfully.' });
+});
+
+// ===============================================================
+// 7. REFERRALS & SHARING (Section 15, 20)
+// ===============================================================
+
+// Claim invite token or referral code (POST /referrals/claim)
+app.post(['/referrals/claim', '/api/referrals/claim'], optionalAuth(store), (req, res) => {
+  const { referralCode, newUserId } = req.body;
+  if (!referralCode || typeof referralCode !== 'string') {
+    return res.status(400).json({ error: 'Valid referral code required.' });
+  }
+
+  const codeClean = referralCode.trim().toUpperCase();
+  const inviter = store.users.find((u) => (u.referralCode || '').toUpperCase() === codeClean);
+
+  if (!inviter) {
+    return res.status(404).json({ error: 'Invalid or expired referral code.' });
+  }
+
+  if (inviter.id === newUserId) {
+    return res.status(400).json({ error: 'Self-referral is not permitted.' });
+  }
+
+  inviter.referredCount = (inviter.referredCount || 0) + 1;
+  logAuditEvent(inviter.id, 'REFERRAL_CLAIMED', newUserId || 'new_user');
+  save();
+
+  res.json({
+    status: 'qualified',
+    message: 'Referral attributed successfully.',
+    inviterAlias: inviter.alias || 'Partner'
+  });
+});
+
+// Get referral details for a user
+app.get(['/referrals/:userId', '/api/referrals/:userId'], (req, res) => {
+  const user = store.users.find((u) => u.id === req.params.userId);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  res.json({
+    referralCode: user.referralCode,
+    referredLearners: user.referredCount || 0,
+    shareUrl: `https://bytalk.app/invite/${user.referralCode}`
+  });
+});
+
+// ===============================================================
+// 8. ADMIN AUDIT & MONITORING (Section 17, 19)
+// ===============================================================
+
+app.get(['/admin/audit', '/api/admin/audit'], (req, res) => {
+  res.json({ total: store.auditLogs.length, auditLogs: store.auditLogs.slice(-50).reverse() });
+});
+
+// ===============================================================
+// 9. DASHBOARD AGGREGATED VIEW (Section 6, 14)
+// ===============================================================
+
+app.get(['/api/dashboard/:userId', '/dashboard/:userId'], (req, res) => {
+  const targetId = req.params.userId || 'u1';
+  const user = store.users.find((u) => u.id === targetId);
+
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  const safePartners = store.users
+    .filter((u) => u.id !== targetId && u.online && !(user.blockedUsers || []).includes(u.id))
+    .slice(0, 5)
+    .map((u) => {
+      const { passwordHash, ...safe } = u;
+      return safe;
+    });
+
+  const { passwordHash, ...safeProfile } = user;
+
+  res.json({
+    user: safeProfile,
+    stats: {
+      streak: user.streak || 0,
+      minutes: user.minutes || 0,
+      words: user.words || 0,
+      quizzesCompleted: user.quizzesCompleted || 0,
+      savedPhrasesCount: (user.savedPhrases || []).length
+    },
+    wordOfTheDay: DAILY_CHALLENGE.wordOfTheDay,
+    quickActionPhrases: COMMON_PHRASES.slice(0, 4),
+    activeRooms: store.rooms.slice(0, 4),
+    availablePartners: safePartners
+  });
+});
+
+// ===============================================================
+// 10. SOCKET.IO & WEBRTC SIGNALING (Section 7, 8, 9, 18, 20)
+// ===============================================================
+
+io.on('connection', (socket) => {
+  console.log(`[Socket.IO] Client connected: ${socket.id} (Transport: ${socket.conn.transport.name})`);
+
+  socket.on('disconnect', (reason) => {
+    console.log(`[Socket.IO] Client disconnected: ${socket.id} (Reason: ${reason})`);
+  });
+
+  socket.on('ping:app', () => socket.emit('pong:app'));
+});
+
+// Initialize full WebRTC audio signaling, matchmaking, and room stage management
+setupSignaling(io, store, save);
+
+// Start server
+const port = Number(process.env.PORT || 4000);
+httpServer.listen(port, '0.0.0.0', () =>
+  console.log(`BYTALK backend running on http://localhost:${port}`)
+);
