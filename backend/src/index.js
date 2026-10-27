@@ -1160,6 +1160,17 @@ io.on('connection', (socket) => {
 // Initialize full WebRTC audio signaling, matchmaking, and room stage management
 setupSignaling(io, store, save);
 
+// Global 404 handler for undefined API routes
+app.use((req, res) => {
+  res.status(404).json({ error: 'Endpoint not found', path: req.originalUrl, service: 'BYTALK API' });
+});
+
+// Global error-handling middleware
+app.use((err, req, res, next) => {
+  console.error('[Unhandled Error]', err);
+  res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
+});
+
 // Start server
 const port = Number(process.env.PORT || 4000);
 httpServer.listen(port, '0.0.0.0', () =>
