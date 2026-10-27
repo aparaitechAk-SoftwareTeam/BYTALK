@@ -304,28 +304,71 @@ function App() {
         {/* 4. REPORTS & SAFETY */}
         {tab === 'Reports' && (
           <div className="panel">
-            <h3>Moderation & Safety Reports Queue</h3>
+            <div style={{ marginBottom: 18 }}>
+              <h3 style={{ margin: 0 }}>Moderation & Safety Reports Queue</h3>
+              <p style={{ margin: '6px 0 0', color: '#697891', fontSize: '13px' }}>
+                🛡️ <strong>Innocent User Safeguard:</strong> Reported accounts are never penalized automatically. Review interaction context, dismiss emotional/false reports, or take targeted action.
+              </p>
+            </div>
+
             {reports.length === 0 ? (
               <p>No safety reports currently flagged.</p>
             ) : (
-              reports.map((x) => (
-                <div className="room" key={x.id}>
-                  <div>
-                    <b>Reason: {x.reason}</b>
-                    <p>
-                      Reported Target: {x.reportedUserId || 'Session Flag'} · Verification:{' '}
-                      <span style={{ fontWeight: '600' }}>{x.verificationStatus || 'standard'}</span> · Status:{' '}
-                      <strong>{x.status}</strong>
-                    </p>
-                    <small style={{ color: '#8894A8' }}>Reported at: {new Date(x.at).toLocaleString()}</small>
+              reports.map((x) => {
+                const targetUser = users.find((u) => u.id === x.reportedUserId);
+                const isUnverified = x.verificationStatus === 'unverified_interaction';
+                return (
+                  <div className="room" key={x.id} style={{ alignItems: 'flex-start', padding: '16px 0' }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                        <span
+                          className="status"
+                          style={{
+                            background: x.status === 'open' ? '#FFF4EE' : '#E8F9F0',
+                            color: x.status === 'open' ? '#FF5226' : '#128C50',
+                            fontSize: '11px',
+                            fontWeight: '700'
+                          }}
+                        >
+                          {x.status === 'open' ? 'PENDING MODERATION' : 'RESOLVED / DISMISSED'}
+                        </span>
+                        <span
+                          className="status"
+                          style={{
+                            background: isUnverified ? '#FEF9E7' : '#EDF5FF',
+                            color: isUnverified ? '#B45309' : '#1E40AF',
+                            fontSize: '11px'
+                          }}
+                        >
+                          {isUnverified ? '⚠️ Unverified Interaction (Potential False Report)' : 'Shared Call Context Verified'}
+                        </span>
+                      </div>
+
+                      <b style={{ fontSize: '15px' }}>Report Reason: "{x.reason}"</b>
+
+                      <p style={{ margin: '6px 0' }}>
+                        Reported Person: <strong>{targetUser ? `${targetUser.name} (${targetUser.alias || targetUser.id})` : x.reportedUserId || 'Session'}</strong>
+                        {' · '}
+                        Account State: <span style={{ color: '#128C50', fontWeight: 'bold' }}>Active & Unpenalized</span>
+                      </p>
+
+                      <small style={{ color: '#8894A8' }}>
+                        Report ID: {x.id.slice(0, 8)}... · Reported At: {new Date(x.at).toLocaleString()}
+                      </small>
+                    </div>
+
+                    {x.status === 'open' && (
+                      <button
+                        className="action"
+                        style={{ backgroundColor: '#128C50', alignSelf: 'center' }}
+                        onClick={() => resolveReport(x.id)}
+                      >
+                        Dismiss False Report
+                      </button>
+                    )}
                   </div>
-                  {x.status === 'open' && (
-                    <button className="action" onClick={() => resolveReport(x.id)}>
-                      Resolve & Dismiss
-                    </button>
-                  )}
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         )}
