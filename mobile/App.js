@@ -145,10 +145,12 @@ function App() {
 
   // Form states
   const [name, setName] = useState(currentUser.name);
+  const [alias, setAlias] = useState(currentUser.alias || 'VedantK');
   const [country, setCountry] = useState(currentUser.country);
   const [nativeLanguage, setNativeLanguage] = useState(currentUser.nativeLanguage);
   const [learningLanguage, setLearningLanguage] = useState(currentUser.learningLanguage);
   const [level, setLevel] = useState(currentUser.level);
+  const [goals, setGoals] = useState('Daily Conversation');
 
   // Sign in / Sign up states
   const [signInEmail, setSignInEmail] = useState('');
@@ -236,7 +238,12 @@ function App() {
         setAuthToken(res.token);
         setCurrentUser(res.user);
         setName(res.user.name || '');
+        setAlias(res.user.alias || res.user.name?.split(' ')[0] || '');
         setCountry(res.user.country || 'India');
+        setNativeLanguage(res.user.nativeLanguage || 'Hindi');
+        setLearningLanguage(res.user.learningLanguage || 'English');
+        setLevel(res.user.level || 'Intermediate');
+        if (res.user.goals) setGoals(res.user.goals);
         setBackendUp(true);
         setScreen('home');
       }
@@ -287,17 +294,19 @@ function App() {
   };
 
   // Save profile updates
-  async function saveProfile(next) {
+  async function saveProfile(next = 'home') {
     setBusy(true);
     try {
-      await request('onboard', {
-        method: 'POST',
-        body: JSON.stringify({ name, country, nativeLanguage, learningLanguage, level }),
-      });
-      setCurrentUser((prev) => ({ ...prev, name, country, nativeLanguage, learningLanguage, level }));
+      await request('me', {
+        method: 'PATCH',
+        body: JSON.stringify({ name, alias, country, nativeLanguage, learningLanguage, level, goals }),
+      }, authToken);
+      setCurrentUser((prev) => ({ ...prev, name, alias, country, nativeLanguage, learningLanguage, level, goals }));
       setBackendUp(true);
+      Alert.alert('Profile Updated', 'Your profile details and conversation preferences have been saved.');
     } catch {
-      setCurrentUser((prev) => ({ ...prev, name, country, nativeLanguage, learningLanguage, level }));
+      setCurrentUser((prev) => ({ ...prev, name, alias, country, nativeLanguage, learningLanguage, level, goals }));
+      Alert.alert('Saved', 'Profile updated for your current session.');
     }
     setBusy(false);
     setScreen(next);
@@ -531,7 +540,7 @@ function App() {
           <Header
             title="Choose your level"
             subtitle="Select your current proficiency so we can match you with suitable conversation partners."
-            onBack={() => setScreen('welcome')}
+            onBack={() => setScreen(currentUser ? 'home' : 'welcome')}
           />
           {[
             ['🌱', 'Beginner', 'I know a few basic words and simple expressions.'],
@@ -568,6 +577,62 @@ function App() {
             </TouchableOpacity>
           ))}
           <Btn label={busy ? 'Saving...' : 'Start Practicing  →'} onPress={() => saveProfile('home')} style={{ marginTop: 8 }} />
+        </ScrollView>
+      )}
+
+      {/* SCREEN: EDIT PROFILE INFO (Section 5.2 & 16) */}
+      {(screen === 'onboard' || screen === 'edit-profile') && (
+        <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
+          <Header
+            title="Edit Profile Info"
+            subtitle="Update your nickname, languages, and conversation preferences."
+            onBack={() => setScreen('home')}
+          />
+
+          <View style={{ alignItems: 'center', marginVertical: 14 }}>
+            <View style={{ width: 72, height: 72, borderRadius: 36, backgroundColor: orangeLight, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#FFD6C7' }}>
+              <Txt size={36}>👨🏽‍💻</Txt>
+            </View>
+            <Txt size={16} bold style={{ marginTop: 8 }}>{name || 'Learner'}</Txt>
+            <Txt size={12} color={muted}>{currentUser.email || 'learner@bytalk.app'}</Txt>
+          </View>
+
+          <Field label="Full Name" value={name} setValue={setName} placeholder="e.g. Vedant Kengale" />
+          <Field label="Public Alias / Nickname (Shown to Call Partners)" value={alias} setValue={setAlias} placeholder="e.g. VedantK" />
+          <Field label="My Country / Region" value={country} setValue={setCountry} placeholder="e.g. India" />
+          <Field label="Native Language" value={nativeLanguage} setValue={setNativeLanguage} placeholder="e.g. Hindi" />
+          <Field label="Language I'm Practicing" value={learningLanguage} setValue={setLearningLanguage} placeholder="e.g. English" />
+
+          <Txt size={13} bold style={{ marginBottom: 6, marginTop: 4 }}>Primary Learning Goal</Txt>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 20 }}>
+            {['Daily Conversation', 'Job Interviews', 'IELTS Practice', 'Travel', 'Work & Business'].map((g) => (
+              <TouchableOpacity
+                key={g}
+                onPress={() => setGoals(g)}
+                style={{
+                  backgroundColor: goals === g ? orange : light,
+                  paddingHorizontal: 14,
+                  paddingVertical: 8,
+                  borderRadius: 18,
+                  borderWidth: 1,
+                  borderColor: goals === g ? orange : border,
+                }}
+              >
+                <Txt size={12} color={goals === g ? '#fff' : navy} bold={goals === g}>
+                  {g}
+                </Txt>
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          <Btn label={busy ? 'Saving Changes...' : 'Save Profile Changes'} onPress={() => saveProfile('home')} style={{ marginTop: 8 }} />
+
+          <TouchableOpacity
+            onPress={() => setScreen('home')}
+            style={{ alignItems: 'center', marginTop: 16, paddingVertical: 10 }}
+          >
+            <Txt color={muted} size={14} bold>Cancel & Return to Dashboard</Txt>
+          </TouchableOpacity>
         </ScrollView>
       )}
 
