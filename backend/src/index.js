@@ -191,6 +191,70 @@ app.post(['/api/rooms/:id/leave', '/rooms/:id/leave'], (req, res) => {
   res.json({ message: 'Left room successfully.', room });
 });
 
+// Create new audio room (Section 8: Host can create/open/close room)
+app.post(['/api/rooms', '/rooms'], optionalAuth(store), (req, res) => {
+  const { name, topic, level, capacity } = req.body;
+  const hostId = req.user?.id || req.body.hostId || 'u1';
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'Room name is required' });
+  }
+  const newRoom = {
+    id: `r_${crypto.randomBytes(4).toString('hex')}`,
+    name: name.trim().slice(0, 60),
+    topic: topic || 'Daily English',
+    level: level || 'All levels',
+    capacity: Number(capacity) || 50,
+    listeners: 1,
+    joined: 1,
+    speakers: [hostId],
+    hostId,
+    speakerRequests: [],
+    isLive: true,
+    createdAt: new Date().toISOString()
+  };
+  store.rooms.push(newRoom);
+  logAuditEvent(hostId, 'ROOM_CREATED', newRoom.id);
+  save();
+  io.emit('rooms:changed', store.rooms);
+  res.status(201).json(newRoom);
+});
+
+// Raise Hand / Request Speaker status (Section 8 & 9)
+app.post(['/api/rooms/:id/raise-hand', '/rooms/:id/raise-hand'], optionalAuth(store), (req, res) => {
+  const room = store.rooms.find((r) => r.id === req.params.id);
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+  const userId = req.user?.id || req.body.userId || 'u1';
+  if (!room.speakerRequests) room.speakerRequests = [];
+  if (!room.speakers) room.speakers = [];
+  if (room.speakers.includes(userId)) {
+    return res.status(400).json({ message: 'User is already a speaker in this room' });
+  }
+  if (!room.speakerRequests.includes(userId)) {
+    room.speakerRequests.push(userId);
+  }
+  save();
+  io.emit('rooms:changed', store.rooms);
+  io.emit(`room:${room.id}:event`, { type: 'raise_hand', userId });
+  res.json({ message: 'Speaker request submitted to room host.', room });
+});
+
+// Host approves speaker request (Section 8)
+app.post(['/api/rooms/:id/approve-speaker', '/rooms/:id/approve-speaker'], (req, res) => {
+  const room = store.rooms.find((r) => r.id === req.params.id);
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId is required' });
+  if (!room.speakers) room.speakers = [];
+  if (!room.speakers.includes(userId)) {
+    room.speakers.push(userId);
+  }
+  room.speakerRequests = (room.speakerRequests || []).filter((id) => id !== userId);
+  save();
+  io.emit('rooms:changed', store.rooms);
+  io.emit(`room:${room.id}:event`, { type: 'speaker_approved', userId });
+  res.json({ message: 'User promoted to speaker.', room });
+});
+
 app.get('/api/messages/:a/:b', (req, res) =>
   res.json(
     store.messages.filter(
@@ -784,6 +848,47 @@ app.get(['/referrals/:userId', '/api/referrals/:userId'], (req, res) => {
 
 app.get(['/admin/audit', '/api/admin/audit'], (req, res) => {
   res.json({ total: store.auditLogs.length, auditLogs: store.auditLogs.slice(-50).reverse() });
+});
+
+// Admin User Status Toggle (Suspend / Ban / Activate per Section 12 & 17)
+app.patch(['/admin/users/:id/status', '/api/admin/users/:id/status'], (req, res) => {
+  const user = store.users.find((u) => u.id === req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const { status } = req.body;
+  if (!['active', 'suspended', 'banned'].includes(status)) {
+    return res.status(400).json({ error: 'Status must be active, suspended, or banned.' });
+  }
+  user.status = status;
+  logAuditEvent('admin', `USER_${status.toUpperCase()}`, user.id);
+  save();
+  res.json({ message: `User status set to ${status}.`, user });
+});
+
+// Phrase CMS (Create & retire phrases per Section 17)
+app.post(['/admin/phrases', '/api/admin/phrases'], (req, res) => {
+  const { phrase, meaning, category, example } = req.body;
+  if (!phrase || !meaning) {
+    return res.status(400).json({ error: 'Phrase and meaning are required.' });
+  }
+  const newPhrase = {
+    id: `phr_cms_${Date.now()}`,
+    category: (category || 'everyday conversation').toLowerCase().trim(),
+    phrase: phrase.trim(),
+    meaning: meaning.trim(),
+    usage: 'Curated phrase entry.',
+    example: example?.trim() || phrase.trim()
+  };
+  COMMON_PHRASES.push(newPhrase);
+  logAuditEvent('admin', 'PHRASE_CREATED', newPhrase.id);
+  res.status(201).json({ message: 'Phrase added to library.', phrase: newPhrase });
+});
+
+app.delete(['/admin/phrases/:id', '/api/admin/phrases/:id'], (req, res) => {
+  const idx = COMMON_PHRASES.findIndex((p) => p.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Phrase not found.' });
+  const removed = COMMON_PHRASES.splice(idx, 1)[0];
+  logAuditEvent('admin', 'PHRASE_RETIRED', removed.id);
+  res.json({ message: 'Phrase retired successfully.', phrase: removed });
 });
 
 // ===============================================================

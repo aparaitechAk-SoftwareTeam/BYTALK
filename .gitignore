@@ -5,3 +5,5 @@ dist/
 *.log
 .DS_Store
 backend/data/store.json
+powershell.bat
+
