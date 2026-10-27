@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
+  TextInput,
   TouchableOpacity,
   ScrollView,
   StyleSheet,
@@ -71,6 +72,61 @@ export default function UserDashboard({
   const [callSeconds, setCallSeconds] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
+
+  // Call Ended & Experience Feedback State (Section 4 & 23)
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [lastCallSeconds, setLastCallSeconds] = useState(0);
+  const [feedbackRating, setFeedbackRating] = useState(5);
+  const [feedbackAudioQuality, setFeedbackAudioQuality] = useState('good');
+  const [feedbackTags, setFeedbackTags] = useState(['Friendly', 'Clear Audio', 'Helpful']);
+  const [callNotes, setCallNotes] = useState('');
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
+
+  const handleEndCall = () => {
+    setLastCallSeconds(callSeconds);
+    setShowVoiceCallModal(false);
+    setShowFeedbackModal(true);
+  };
+
+  const handleSubmitFeedback = async () => {
+    setIsSubmittingFeedback(true);
+    try {
+      const API = process.env.EXPO_PUBLIC_API_URL || (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000');
+      // 1. Submit call experience rating
+      await fetch(`${API}/api/calls/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user?.id || 'u1',
+          partnerId: activeCallPartner?.id || 'anonymous',
+          rating: feedbackRating,
+          audioQuality: feedbackAudioQuality,
+          tags: feedbackTags,
+          comment: callNotes
+        })
+      });
+
+      // 2. Save private in-call notes if provided (Section 4 & 14)
+      if (callNotes.trim()) {
+        await fetch(`${API}/api/notes`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: user?.id || 'u1',
+            title: `Call with ${activeCallPartner?.name || 'Partner'}`,
+            content: callNotes.trim(),
+            partnerAlias: activeCallPartner?.name || 'Partner'
+          })
+        });
+      }
+    } catch {
+      // offline fallback
+    } finally {
+      setIsSubmittingFeedback(false);
+      setShowFeedbackModal(false);
+      setCallNotes('');
+    }
+  };
 
   const [showQuizModal, setShowQuizModal] = useState(false);
   const [currentQuizIndex, setCurrentQuizIndex] = useState(0);
@@ -1001,7 +1057,7 @@ export default function UserDashboard({
               {/* End Call Button */}
               <TouchableOpacity
                 style={styles.callEndButton}
-                onPress={() => setShowVoiceCallModal(false)}
+                onPress={handleEndCall}
                 accessibilityLabel="End Audio Call"
               >
                 <Ionicons name="call" size={26} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
@@ -1022,6 +1078,127 @@ export default function UserDashboard({
                 <Text style={styles.callControlLabel}>{isSpeakerOn ? 'Speaker' : 'Earpiece'}</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ========================================================== */}
+      {/* MODAL: CALL ENDED & EXPERIENCE FEEDBACK (Section 4 & 23) */}
+      {/* ========================================================== */}
+      <Modal
+        visible={showFeedbackModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowFeedbackModal(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, { maxWidth: 440 }]}>
+            <View style={{ alignItems: 'center', marginBottom: 14 }}>
+              <View style={{ width: 54, height: 54, borderRadius: 27, backgroundColor: '#E6F9F0', alignItems: 'center', justifyContent: 'center', marginBottom: 8 }}>
+                <Ionicons name="checkmark-circle" size={34} color="#10B981" />
+              </View>
+              <Text style={{ fontSize: 20, fontWeight: '800', color: navy }}>Call Completed!</Text>
+              <Text style={{ fontSize: 13, color: muted, marginTop: 4 }}>
+                Partner: {activeCallPartner?.name || 'Conversation Partner'} · Duration: {formatCallTimer(lastCallSeconds)}
+              </Text>
+            </View>
+
+            {/* Star Rating */}
+            <Text style={{ fontSize: 13, fontWeight: '700', color: navy, marginBottom: 8, textAlign: 'center' }}>
+              How was your speaking experience?
+            </Text>
+            <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 10, marginBottom: 14 }}>
+              {[1, 2, 3, 4, 5].map((star) => (
+                <TouchableOpacity key={star} onPress={() => setFeedbackRating(star)}>
+                  <Ionicons
+                    name={star <= feedbackRating ? 'star' : 'star-outline'}
+                    size={30}
+                    color={star <= feedbackRating ? '#F59E0B' : '#D1D5DB'}
+                  />
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Feedback Tags */}
+            <Text style={{ fontSize: 12, fontWeight: '700', color: navy, marginBottom: 6 }}>
+              Partner Feedback Tags:
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+              {['Friendly', 'Clear Audio', 'Helpful', 'Good Fluency', 'Patient'].map((tag) => {
+                const isSelected = feedbackTags.includes(tag);
+                return (
+                  <TouchableOpacity
+                    key={tag}
+                    onPress={() => {
+                      if (isSelected) setFeedbackTags(feedbackTags.filter((t) => t !== tag));
+                      else setFeedbackTags([...feedbackTags, tag]);
+                    }}
+                    style={{
+                      paddingHorizontal: 10,
+                      paddingVertical: 5,
+                      borderRadius: 14,
+                      backgroundColor: isSelected ? orangeLight : light,
+                      borderWidth: 1,
+                      borderColor: isSelected ? orange : border,
+                    }}
+                  >
+                    <Text style={{ fontSize: 11, color: isSelected ? orange : navy, fontWeight: isSelected ? '700' : '400' }}>
+                      {tag}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            {/* In-Call Private Learning Notes (Section 4 & 14) */}
+            <Text style={{ fontSize: 12, fontWeight: '700', color: navy, marginBottom: 6 }}>
+              Private Learning Notes:
+            </Text>
+            <TextInput
+              style={{
+                backgroundColor: light,
+                borderWidth: 1,
+                borderColor: border,
+                borderRadius: 12,
+                padding: 10,
+                fontSize: 13,
+                color: navy,
+                minHeight: 55,
+                textAlignVertical: 'top',
+                marginBottom: 14,
+              }}
+              placeholder="Save vocabulary, grammar points, or notes from this call..."
+              placeholderTextColor="#9CA3AF"
+              multiline
+              value={callNotes}
+              onChangeText={setCallNotes}
+            />
+
+            <TouchableOpacity
+              style={{
+                backgroundColor: orange,
+                paddingVertical: 13,
+                borderRadius: 22,
+                alignItems: 'center',
+                marginBottom: 8,
+              }}
+              onPress={handleSubmitFeedback}
+              disabled={isSubmittingFeedback}
+            >
+              <Text style={{ color: '#FFFFFF', fontSize: 14, fontWeight: '700' }}>
+                {isSubmittingFeedback ? 'Saving...' : 'Submit Feedback & Save Notes'}
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={{ paddingVertical: 6, alignItems: 'center' }}
+              onPress={() => {
+                setShowFeedbackModal(false);
+                setCallNotes('');
+              }}
+            >
+              <Text style={{ color: muted, fontSize: 12 }}>Skip & Return to Dashboard</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
