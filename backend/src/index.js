@@ -227,7 +227,7 @@ app.post(['/api/rooms/:id/raise-hand', '/rooms/:id/raise-hand'], optionalAuth(st
   if (!room.speakerRequests) room.speakerRequests = [];
   if (!room.speakers) room.speakers = [];
   if (room.speakers.includes(userId)) {
-    return res.status(400).json({ message: 'User is already a speaker in this room' });
+    return res.json({ message: 'User is already a speaker in this room', room });
   }
   if (!room.speakerRequests.includes(userId)) {
     room.speakerRequests.push(userId);
@@ -809,7 +809,11 @@ app.post(['/referrals/claim', '/api/referrals/claim'], optionalAuth(store), (req
   }
 
   const codeClean = referralCode.trim().toUpperCase();
-  const inviter = store.users.find((u) => (u.referralCode || '').toUpperCase() === codeClean);
+  const inviter = store.users.find(
+    (u) =>
+      (u.referralCode || '').toUpperCase() === codeClean ||
+      (u.referralCode || '').toUpperCase().startsWith(codeClean)
+  );
 
   if (!inviter) {
     return res.status(404).json({ error: 'Invalid or expired referral code.' });
