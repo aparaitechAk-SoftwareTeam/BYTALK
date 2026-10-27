@@ -66,16 +66,16 @@ function App() {
     load();
   }, []);
 
-  async function resolveReport(id) {
+  async function resolveReport(id, status = 'resolved', notes = '') {
     try {
       await fetch(`${API}/api/reports/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'resolved' })
+        body: JSON.stringify({ status, moderatorNotes: notes })
       });
       load();
     } catch {
-      alert('Failed to resolve report.');
+      alert('Failed to update report status.');
     }
   }
 
@@ -316,22 +316,26 @@ function App() {
             ) : (
               reports.map((x) => {
                 const targetUser = users.find((u) => u.id === x.reportedUserId);
+                const reporterUser = users.find((u) => u.id === x.reporterId);
                 const isUnverified = x.verificationStatus === 'unverified_interaction';
+                const isDismissedAsFalse = x.status === 'dismissed_as_false';
+
                 return (
-                  <div className="room" key={x.id} style={{ alignItems: 'flex-start', padding: '16px 0' }}>
+                  <div className="room" key={x.id} style={{ alignItems: 'flex-start', padding: '16px 0', borderBottom: '1px solid #E2E8F0' }}>
                     <div style={{ flex: 1 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', flexWrap: 'wrap' }}>
                         <span
                           className="status"
                           style={{
-                            background: x.status === 'open' ? '#FFF4EE' : '#E8F9F0',
-                            color: x.status === 'open' ? '#FF5226' : '#128C50',
+                            background: x.status === 'open' ? '#FFF4EE' : isDismissedAsFalse ? '#FFE8E6' : '#E8F9F0',
+                            color: x.status === 'open' ? '#FF5226' : isDismissedAsFalse ? '#D92D20' : '#128C50',
                             fontSize: '11px',
                             fontWeight: '700'
                           }}
                         >
-                          {x.status === 'open' ? 'PENDING MODERATION' : 'RESOLVED / DISMISSED'}
+                          {x.status === 'open' ? 'PENDING MODERATION' : isDismissedAsFalse ? 'REVERTED: FALSE REPORT (PENALIZED)' : 'RESOLVED / DISMISSED'}
                         </span>
+
                         <span
                           className="status"
                           style={{
@@ -340,32 +344,70 @@ function App() {
                             fontSize: '11px'
                           }}
                         >
-                          {isUnverified ? '⚠️ Unverified Interaction (Potential False Report)' : 'Shared Call Context Verified'}
+                          {isUnverified ? '⚠️ Unverified Interaction' : 'Shared Call Context Verified'}
                         </span>
+
+                        {isDismissedAsFalse && (
+                          <span className="status" style={{ background: '#FEE2E2', color: '#991B1B', fontSize: '11px', fontWeight: 'bold' }}>
+                            ⚖️ Accuser Penalized
+                          </span>
+                        )}
                       </div>
 
                       <b style={{ fontSize: '15px' }}>Report Reason: "{x.reason}"</b>
 
-                      <p style={{ margin: '6px 0' }}>
-                        Reported Person: <strong>{targetUser ? `${targetUser.name} (${targetUser.alias || targetUser.id})` : x.reportedUserId || 'Session'}</strong>
-                        {' · '}
-                        Account State: <span style={{ color: '#128C50', fontWeight: 'bold' }}>Active & Unpenalized</span>
-                      </p>
+                      <div style={{ margin: '8px 0', fontSize: '13px', lineHeight: '20px' }}>
+                        <p style={{ margin: '2px 0' }}>
+                          Reported Person (Innocent Target): <strong>{targetUser ? `${targetUser.name} (${targetUser.alias || targetUser.id})` : x.reportedUserId || 'Session'}</strong>
+                          {' — '}
+                          <span style={{ color: '#128C50', fontWeight: 'bold' }}>Status: Protected & Active</span>
+                        </p>
+                        <p style={{ margin: '2px 0', color: '#4B5563' }}>
+                          Submitted By (Accuser): <strong>{reporterUser ? `${reporterUser.name} (${reporterUser.alias || reporterUser.id})` : x.reporterId || 'Anonymous'}</strong>
+                          {reporterUser?.falseReportCount ? (
+                            <span style={{ color: '#DC2626', fontWeight: 'bold' }}> (⚠️ {reporterUser.falseReportCount} False Report Strikes)</span>
+                          ) : (
+                            <span style={{ color: '#6B7280' }}> (0 prior strikes)</span>
+                          )}
+                        </p>
+                      </div>
 
                       <small style={{ color: '#8894A8' }}>
                         Report ID: {x.id.slice(0, 8)}... · Reported At: {new Date(x.at).toLocaleString()}
+                        {x.moderatorNotes && ` · Notes: ${x.moderatorNotes}`}
                       </small>
                     </div>
 
-                    {x.status === 'open' && (
-                      <button
-                        className="action"
-                        style={{ backgroundColor: '#128C50', alignSelf: 'center' }}
-                        onClick={() => resolveReport(x.id)}
-                      >
-                        Dismiss False Report
-                      </button>
-                    )}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginLeft: '12px' }}>
+                      {x.status === 'open' ? (
+                        <>
+                          <button
+                            className="action"
+                            style={{ backgroundColor: '#128C50', padding: '8px 12px', fontSize: '12px' }}
+                            onClick={() => resolveReport(x.id, 'resolved', 'Dismissed as minor dispute.')}
+                          >
+                            Dismiss Report
+                          </button>
+                          <button
+                            className="action"
+                            style={{ backgroundColor: '#D92D20', padding: '8px 12px', fontSize: '12px' }}
+                            onClick={() => resolveReport(x.id, 'dismissed_as_false', 'False report confirmed. Strike added to accuser.')}
+                          >
+                            ⚖️ Penalize Accuser
+                          </button>
+                        </>
+                      ) : (
+                        !isDismissedAsFalse && (
+                          <button
+                            className="action"
+                            style={{ backgroundColor: '#EF4444', padding: '6px 10px', fontSize: '11px' }}
+                            onClick={() => resolveReport(x.id, 'dismissed_as_false', 'Reverted: Admitted false report. Reporter penalized.')}
+                          >
+                            Revert & Strike Accuser
+                          </button>
+                        )
+                      )}
+                    </div>
                   </div>
                 );
               })
