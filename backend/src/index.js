@@ -68,6 +68,10 @@ try {
 // Data normalization to ensure all fields from Section 19 exist
 if (!store.blocks) store.blocks = [];
 if (!store.auditLogs) store.auditLogs = [];
+if (!store.callFeedback) store.callFeedback = [];
+if (!store.notes) store.notes = [];
+if (!store.notificationPreferences) store.notificationPreferences = {};
+if (!store.passwordResetTokens) store.passwordResetTokens = [];
 store.users.forEach((u) => {
   if (!u.savedPhrases) u.savedPhrases = [];
   if (!u.blockedUsers) u.blockedUsers = [];
@@ -171,6 +175,16 @@ app.post('/api/onboard', (req, res) => {
 });
 
 app.get(['/api/rooms', '/rooms'], (req, res) => res.json(store.rooms));
+
+// Fetch specific room details (Section 20: GET /rooms; GET /rooms/:id)
+app.get(['/api/rooms/:id', '/rooms/:id'], (req, res) => {
+  const room = store.rooms.find((r) => r.id === req.params.id);
+  if (!room) return res.status(404).json({ error: 'Room not found' });
+  const speakerDetails = store.users
+    .filter((u) => (room.speakers || []).includes(u.id))
+    .map(({ passwordHash, ...safe }) => safe);
+  res.json({ ...room, speakerDetails });
+});
 
 app.post(['/api/rooms/:id/join', '/rooms/:id/join'], (req, res) => {
   const room = store.rooms.find((r) => r.id === req.params.id);
@@ -530,6 +544,52 @@ app.post(['/auth/login', '/api/auth/login'], (req, res) => {
   });
 });
 
+// Password Reset Request (Section 5.1: "password reset and verification")
+app.post(['/auth/forgot-password', '/api/auth/forgot-password'], (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email address is required.' });
+  const user = store.users.find((u) => (u.email || '').toLowerCase() === email.toLowerCase().trim());
+  if (!user) {
+    return res.json({ message: 'If that email is registered, a password reset token has been generated.' });
+  }
+  const resetToken = crypto.randomBytes(24).toString('hex');
+  if (!store.passwordResetTokens) store.passwordResetTokens = [];
+  store.passwordResetTokens.push({
+    userId: user.id,
+    token: resetToken,
+    expiresAt: Date.now() + 3600 * 1000 // 1 hour validity
+  });
+  logAuditEvent(user.id, 'PASSWORD_RESET_REQUESTED', user.id);
+  save();
+  res.json({
+    message: 'Password reset token generated.',
+    resetToken
+  });
+});
+
+// Password Reset Completion (Section 5.1)
+app.post(['/auth/reset-password', '/api/auth/reset-password'], (req, res) => {
+  const { resetToken, newPassword } = req.body;
+  if (!resetToken || !newPassword || newPassword.length < 6) {
+    return res.status(400).json({ error: 'Valid reset token and new password (min 6 chars) are required.' });
+  }
+  if (!store.passwordResetTokens) store.passwordResetTokens = [];
+  const tokenEntry = store.passwordResetTokens.find(
+    (t) => t.token === resetToken && t.expiresAt > Date.now()
+  );
+  if (!tokenEntry) {
+    return res.status(400).json({ error: 'Invalid or expired password reset token.' });
+  }
+  const user = store.users.find((u) => u.id === tokenEntry.userId);
+  if (!user) return res.status(404).json({ error: 'User not found.' });
+
+  user.passwordHash = hashPassword(newPassword);
+  store.passwordResetTokens = store.passwordResetTokens.filter((t) => t.token !== resetToken);
+  logAuditEvent(user.id, 'PASSWORD_RESET_COMPLETED', user.id);
+  save();
+  res.json({ message: 'Password reset successful. You can now login with your new password.' });
+});
+
 // User Profile (GET /me, PATCH /me, DELETE /me per Section 16 & 20)
 app.get(['/me', '/api/me'], optionalAuth(store), (req, res) => {
   const user = req.user || store.users[0];
@@ -564,6 +624,35 @@ app.delete(['/me', '/api/me'], optionalAuth(store), (req, res) => {
   save();
 
   res.json({ message: 'Account and associated personal data deleted cleanly.' });
+});
+
+// Privacy Data Export / Takeout (Section 16: "data export/request consistent with applicable laws")
+app.get(['/me/export', '/api/me/export'], optionalAuth(store), (req, res) => {
+  const user = req.user || store.users[0];
+  const { passwordHash, ...safeUser } = user;
+  const userNotes = (store.notes || []).filter((n) => n.userId === user.id);
+  const userVocab = (store.vocabulary || []).filter((v) => v.userId === user.id);
+  const userSavedPhrases = COMMON_PHRASES.filter((p) => (user.savedPhrases || []).includes(p.id));
+  const userFeedback = (store.callFeedback || []).filter((f) => f.userId === user.id);
+
+  logAuditEvent(user.id, 'DATA_EXPORT_REQUESTED', user.id);
+
+  res.setHeader('Content-Disposition', `attachment; filename="bytalk-export-${user.id}.json"`);
+  res.json({
+    exportVersion: '1.0',
+    exportedAt: new Date().toISOString(),
+    user: safeUser,
+    learningHistory: {
+      streak: user.streak || 0,
+      practiceMinutes: user.minutes || 0,
+      wordsCount: user.words || 0,
+      quizzesCompleted: user.quizzesCompleted || 0
+    },
+    vocabulary: userVocab,
+    savedPhrases: userSavedPhrases,
+    notes: userNotes,
+    callFeedback: userFeedback
+  });
 });
 
 // ===============================================================
@@ -893,6 +982,129 @@ app.delete(['/admin/phrases/:id', '/api/admin/phrases/:id'], (req, res) => {
   const removed = COMMON_PHRASES.splice(idx, 1)[0];
   logAuditEvent('admin', 'PHRASE_RETIRED', removed.id);
   res.json({ message: 'Phrase retired successfully.', phrase: removed });
+});
+
+// Vocabulary Question CMS (Section 17: "Vocabulary CMS: Create, edit, publish and retire word-game questions")
+app.post(['/admin/questions', '/api/admin/questions'], (req, res) => {
+  const { type, prompt, options, answer, difficulty, explanation } = req.body;
+  if (!prompt || !Array.isArray(options) || options.length < 2 || answer === undefined) {
+    return res.status(400).json({ error: 'Prompt, options array (min 2), and correct answer index are required.' });
+  }
+  const newQuestion = {
+    id: `gm_cms_${Date.now()}`,
+    type: type || 'Word Meaning',
+    prompt: prompt.trim(),
+    options,
+    answer: Number(answer),
+    difficulty: difficulty || 'Intermediate',
+    explanation: explanation || 'Curated question.'
+  };
+  WORD_GAME_BANK.push(newQuestion);
+  logAuditEvent('admin', 'QUESTION_CREATED', newQuestion.id);
+  res.status(201).json({ message: 'Question added to game bank.', question: newQuestion });
+});
+
+app.delete(['/admin/questions/:id', '/api/admin/questions/:id'], (req, res) => {
+  const idx = WORD_GAME_BANK.findIndex((q) => q.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Question not found.' });
+  const removed = WORD_GAME_BANK.splice(idx, 1)[0];
+  logAuditEvent('admin', 'QUESTION_RETIRED', removed.id);
+  res.json({ message: 'Question retired successfully.', question: removed });
+});
+
+// Call Experience Feedback (Section 4 & 20 & 23: "submit optional experience feedback", "call ended/feedback")
+app.post(['/api/calls/feedback', '/calls/feedback'], optionalAuth(store), (req, res) => {
+  const userId = req.user?.id || req.body.userId || 'anonymous';
+  const { sessionId, partnerId, rating, audioQuality, tags, comment } = req.body;
+  if (!rating || rating < 1 || rating > 5) {
+    return res.status(400).json({ error: 'Rating between 1 and 5 is required.' });
+  }
+  const feedback = {
+    id: `fb_${crypto.randomUUID()}`,
+    userId,
+    sessionId: sessionId || null,
+    partnerId: partnerId || null,
+    rating: Number(rating),
+    audioQuality: audioQuality || 'good',
+    tags: Array.isArray(tags) ? tags : [],
+    comment: comment ? String(comment).slice(0, 300) : '',
+    submittedAt: new Date().toISOString()
+  };
+  if (!store.callFeedback) store.callFeedback = [];
+  store.callFeedback.push(feedback);
+  logAuditEvent(userId, 'CALL_FEEDBACK_SUBMITTED', sessionId || partnerId);
+  save();
+  res.status(201).json({ message: 'Thank you for your feedback! It helps improve matching quality.', feedback });
+});
+
+// Learner Private Notes (Section 4 & 14: "take private learning notes", "deletion of user-controlled notes")
+app.get(['/api/notes/:userId', '/notes/:userId'], optionalAuth(store), (req, res) => {
+  const userId = req.params.userId;
+  const userNotes = (store.notes || []).filter((n) => n.userId === userId);
+  res.json({ total: userNotes.length, notes: userNotes });
+});
+
+app.post(['/api/notes', '/notes'], optionalAuth(store), (req, res) => {
+  const userId = req.user?.id || req.body.userId || 'u1';
+  const { title, content, partnerAlias, category } = req.body;
+  if (!content || !content.trim()) {
+    return res.status(400).json({ error: 'Note content cannot be empty.' });
+  }
+  const note = {
+    id: `note_${crypto.randomUUID()}`,
+    userId,
+    title: title ? title.trim().slice(0, 100) : 'Practice Note',
+    content: content.trim(),
+    partnerAlias: partnerAlias || null,
+    category: category || 'Speaking Practice',
+    createdAt: new Date().toISOString()
+  };
+  if (!store.notes) store.notes = [];
+  store.notes.push(note);
+  logAuditEvent(userId, 'NOTE_CREATED', note.id);
+  save();
+  res.status(201).json(note);
+});
+
+app.delete(['/api/notes/:id', '/notes/:id'], (req, res) => {
+  if (!store.notes) store.notes = [];
+  const idx = store.notes.findIndex((n) => n.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Note not found' });
+  const [removed] = store.notes.splice(idx, 1);
+  save();
+  res.json({ message: 'Note deleted successfully.', note: removed });
+});
+
+// Notification Preferences (Section 13: "consent, category toggles, quiet hours and unsubscribe controls")
+app.get(['/api/notifications/preferences/:userId', '/notifications/preferences/:userId'], (req, res) => {
+  const userId = req.params.userId;
+  const prefs = store.notificationPreferences?.[userId] || {
+    dailyReminders: true,
+    roomAlerts: true,
+    weeklyProgress: true,
+    quietHoursEnabled: false,
+    quietHoursStart: '22:00',
+    quietHoursEnd: '08:00'
+  };
+  res.json({ userId, preferences: prefs });
+});
+
+app.patch(['/api/notifications/preferences', '/notifications/preferences'], optionalAuth(store), (req, res) => {
+  const userId = req.user?.id || req.body.userId || 'u1';
+  if (!store.notificationPreferences) store.notificationPreferences = {};
+  store.notificationPreferences[userId] = {
+    ...(store.notificationPreferences[userId] || {
+      dailyReminders: true,
+      roomAlerts: true,
+      weeklyProgress: true,
+      quietHoursEnabled: false,
+      quietHoursStart: '22:00',
+      quietHoursEnd: '08:00'
+    }),
+    ...req.body
+  };
+  save();
+  res.json({ message: 'Notification preferences updated.', preferences: store.notificationPreferences[userId] });
 });
 
 // ===============================================================

@@ -255,7 +255,89 @@ async function runTests() {
   const stats = await request('/api/stats');
   assert(stats.ok && stats.data.users > 0, 'GET /api/stats');
 
-  // 12. Socket.IO Real-Time Signaling
+  // 12. Advanced PRD Features: Notes, Feedback, Data Export, Preferences, Password Reset, Question CMS
+  // Room by ID
+  const getSingleRoom = await request(`/api/rooms/${testRoomId}`);
+  assert(getSingleRoom.ok && getSingleRoom.data.id === testRoomId, 'GET /api/rooms/:id');
+
+  // Call Feedback
+  const submitFeedback = await request('/api/calls/feedback', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      sessionId: 'call_test_123',
+      rating: 5,
+      audioQuality: 'excellent',
+      tags: ['fluent', 'helpful'],
+      comment: 'Great conversation partner!'
+    })
+  });
+  assert(submitFeedback.status === 201 && submitFeedback.data.feedback, 'POST /api/calls/feedback');
+
+  // Learner Private Notes
+  const createNote = await request('/api/notes', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      title: 'Vocabulary from Call',
+      content: 'Partner introduced idiom: beat around the bush.'
+    })
+  });
+  assert(createNote.status === 201 && createNote.data.id, 'POST /api/notes');
+  const testNoteId = createNote.data.id;
+
+  const getNotes = await request(`/api/notes/${testUserId}`);
+  assert(getNotes.ok && getNotes.data.total >= 1, 'GET /api/notes/:userId');
+
+  const deleteNote = await request(`/api/notes/${testNoteId}`, { method: 'DELETE' });
+  assert(deleteNote.ok, 'DELETE /api/notes/:id');
+
+  // Data Export / GDPR
+  const dataExport = await request('/me/export', { headers: { Authorization: `Bearer ${token}` } });
+  assert(dataExport.ok && dataExport.data.exportVersion === '1.0' && dataExport.data.learningHistory, 'GET /me/export (Data Portability)');
+
+  // Notification Preferences
+  const getNotifPrefs = await request(`/api/notifications/preferences/${testUserId}`);
+  assert(getNotifPrefs.ok && getNotifPrefs.data.preferences, 'GET /api/notifications/preferences/:userId');
+
+  const updateNotifPrefs = await request('/api/notifications/preferences', {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ dailyReminders: false, quietHoursEnabled: true })
+  });
+  assert(updateNotifPrefs.ok && updateNotifPrefs.data.preferences.dailyReminders === false, 'PATCH /api/notifications/preferences');
+
+  // Password Reset Flow
+  const forgotPw = await request('/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ email: testEmail })
+  });
+  assert(forgotPw.ok && forgotPw.data.resetToken, 'POST /auth/forgot-password');
+
+  const resetPw = await request('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ resetToken: forgotPw.data.resetToken, newPassword: 'newPassword456' })
+  });
+  assert(resetPw.ok, 'POST /auth/reset-password');
+
+  // Question CMS
+  const addQuestionCMS = await request('/admin/questions', {
+    method: 'POST',
+    body: JSON.stringify({
+      type: 'Word Meaning',
+      prompt: 'What does "Tenacious" mean?',
+      options: ['Tending to keep a firm hold', 'Easily discouraged', 'Careless', 'Passive'],
+      answer: 0,
+      difficulty: 'Advanced'
+    })
+  });
+  assert(addQuestionCMS.status === 201 && addQuestionCMS.data.question.id, 'POST /admin/questions');
+  const customQuestionId = addQuestionCMS.data.question.id;
+
+  const deleteQuestionCMS = await request(`/admin/questions/${customQuestionId}`, { method: 'DELETE' });
+  assert(deleteQuestionCMS.ok, 'DELETE /admin/questions/:id');
+
+  // 13. Socket.IO Real-Time Signaling
   await new Promise((resolve) => {
     const socket = ClientIO(BASE_URL, { transports: ['websocket', 'polling'] });
     socket.on('connect', () => {
