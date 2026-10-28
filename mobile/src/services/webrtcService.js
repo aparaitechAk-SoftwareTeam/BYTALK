@@ -400,3 +400,4 @@ class WebRTCService {
 // Export singleton instance
 export const webrtcService = new WebRTCService();
 export default webrtcService;
+
