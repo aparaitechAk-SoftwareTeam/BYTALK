@@ -7,3 +7,4 @@ dist/
 backend/data/store.json
 powershell.bat
 
+.env*.local

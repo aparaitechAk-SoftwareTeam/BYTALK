@@ -5,20 +5,26 @@
   "private": true,
   "scripts": {
     "start": "expo start",
+    "tunnel": "expo start --tunnel",
+    "lan": "expo start --lan",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.2",
-    "expo": "~54.0.0",
-    "expo-linear-gradient": "~15.0.7",
-    "expo-status-bar": "~3.0.8",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "react-native": "0.81.4",
-    "react-native-safe-area-context": "~5.6.0",
+    "expo": "~57.0.0",
+    "expo-font": "~57.0.4",
+    "expo-linear-gradient": "~57.0.2",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-safe-area-context": "~5.7.0",
     "react-native-web": "^0.21.0",
     "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@expo/ngrok": "^4.1.3"
   }
 }
