@@ -1,8 +1,4 @@
-<<<<<<< Updated upstream
-import React,{useEffect,useState} from 'react';
-import { View,Text,TextInput,TouchableOpacity,ScrollView,SafeAreaView,StatusBar,KeyboardAvoidingView,Platform,Alert,ActivityIndicator } from 'react-native';
-=======
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -14,46 +10,21 @@ import {
   Platform,
   Alert,
   Image,
+  RefreshControl,
   StyleSheet,
   Dimensions,
+  useWindowDimensions,
   ActivityIndicator,
   KeyboardAvoidingView,
 } from 'react-native';
->>>>>>> Stashed changes
 import { Ionicons } from '@expo/vector-icons';
 import { io } from 'socket.io-client';
-<<<<<<< Updated upstream
-const API=process.env.EXPO_PUBLIC_API_URL || (Platform.OS==='android'?'http://10.0.2.2:4000':'http://localhost:4000');
-const orange='#ff6847',navy='#142447',muted='#788496',light='#f5f7fb';
-const fallbackPartners=[{id:'u2',name:'Yuki',country:'Japan',nativeLanguage:'Japanese',learningLanguage:'English',level:'Intermediate',online:true},{id:'u3',name:'Lucas',country:'Brazil',nativeLanguage:'Portuguese',learningLanguage:'English',level:'Beginner',online:true},{id:'u4',name:'Minji',country:'South Korea',nativeLanguage:'Korean',learningLanguage:'English',level:'Intermediate',online:true},{id:'u5',name:'Carlos',country:'Mexico',nativeLanguage:'Spanish',learningLanguage:'English',level:'Intermediate',online:true},{id:'u6',name:'Aditi',country:'India',nativeLanguage:'Hindi',learningLanguage:'English',level:'Beginner',online:true}];
-const fallbackRooms=[{id:'r1',name:'Everyday English',topic:'English',level:'Beginner - Intermediate',listeners:24},{id:'r2',name:'Travel stories',topic:'Travel',level:'Intermediate - Advanced',listeners:18},{id:'r3',name:'Movies & culture',topic:'Culture',level:'All levels',listeners:32},{id:'r4',name:'Language exchange',topic:'Study',level:'Beginner - Intermediate',listeners:12}];
-async function request(endpoint,options){const response=await fetch(`${API}/api/${endpoint}`,{headers:{'Content-Type':'application/json'},...options});if(!response.ok)throw new Error('Unable to connect to server');return response.json();}
-const Txt=({children,size=14,color=navy,bold=false,style={}})=><Text style={{fontSize:size,color,fontWeight:bold?'700':'400',...style}}>{children}</Text>;
-const Btn=({label,onPress,outline=false,style={}})=><TouchableOpacity onPress={onPress} style={{backgroundColor:outline?'#fff':orange,borderWidth:outline?1:0,borderColor:orange,padding:15,borderRadius:26,alignItems:'center',...style}}><Txt color={outline?orange:'#fff'} bold>{label}</Txt></TouchableOpacity>;
-const Section=({title,children})=><View style={{marginBottom:22}}><Txt size={16} bold style={{marginBottom:12}}>{title}</Txt>{children}</View>;
-function App(){const[screen,setScreen]=useState('onboard'),[name,setName]=useState('Pavan Nerkar'),[country,setCountry]=useState('India'),[nativeLanguage,setNativeLanguage]=useState('Hindi'),[learningLanguage,setLearningLanguage]=useState('English'),[level,setLevel]=useState('Beginner'),[partners,setPartners]=useState(fallbackPartners),[rooms,setRooms]=useState(fallbackRooms),[search,setSearch]=useState(''),[selected,setSelected]=useState(fallbackPartners[0]),[messages,setMessages]=useState([]),[draft,setDraft]=useState(''),[filter,setFilter]=useState('All'),[vocab,setVocab]=useState([]),[word,setWord]=useState(''),[backendUp,setBackendUp]=useState(false),[busy,setBusy]=useState(false);
-const refresh=async()=>{try{const [p,r,v]=await Promise.all([request('partners'),request('rooms'),request('vocabulary/u1')]);setPartners(p);setRooms(r);setVocab(v);setBackendUp(true);}catch{setBackendUp(false)}};
-useEffect(()=>{refresh();const socket=io(API,{transports:['websocket','polling']});socket.on('message:new',m=>{setMessages(prev=>prev.some(x=>x.id===m.id)?prev:[...prev,m])});socket.on('rooms:changed',setRooms);return()=>socket.disconnect()},[]);
-useEffect(()=>{if(screen==='chat'){request(`messages/u1/${selected.id}`).then(setMessages).catch(()=>setMessages([]))}},[selected,screen]);
-async function saveProfile(next){setBusy(true);try{await request('onboard',{method:'POST',body:JSON.stringify({name,country,nativeLanguage,learningLanguage,level})});setBackendUp(true)}catch{Alert.alert('Offline preview','Backend not reachable. Screen navigation still works.')}setBusy(false);setScreen(next)}
-async function send(){if(!draft.trim())return;const text=draft.trim();setDraft('');try{const result=await request('messages',{method:'POST',body:JSON.stringify({from:'u1',to:selected.id,text})});setMessages(prev=>prev.some(x=>x.id===result.id)?prev:[...prev,result])}catch{Alert.alert('Failed to send','Connect mobile to backend first.');setDraft(text)}}
-async function join(room){try{await request(`rooms/${room.id}/join`,{method:'POST'});Alert.alert('Joined demo room',`You're in ${room.name}. Live microphone streaming is not yet included.`);refresh()}catch{Alert.alert('Cannot join','Start and connect backend first.')}}
-async function addWord(){if(!word.trim())return;try{const x=await request('vocabulary',{method:'POST',body:JSON.stringify({userId:'u1',word,category:'Conversation'})});setVocab(v=>[...v,x]);setWord('')}catch{Alert.alert('Connection required','Start backend first.')}}
-const tabItems=[['discover','compass','Discover'],['rooms','mic','Rooms'],['chat','chatbubbles','Messages'],['dashboard','bar-chart','Profile']];
-const Header=({title,subtitle})=><View style={{paddingHorizontal:22,paddingTop:18,paddingBottom:14}}><Txt size={27} bold>{title}</Txt>{subtitle&&<Txt color={muted} style={{marginTop:5}}>{subtitle}</Txt>}</View>;
-const Field=({label,value,setValue,placeholder})=><View style={{marginBottom:15}}><Txt size={13} bold style={{marginBottom:8}}>{label}</Txt><TextInput value={value} onChangeText={setValue} placeholder={placeholder} style={{backgroundColor:'#fff',borderColor:'#e0e5ee',borderWidth:1,borderRadius:13,padding:15,color:navy,fontSize:15}}/></View>;
-return <SafeAreaView style={{flex:1,backgroundColor:'#fff',paddingTop:Platform.OS==='android'?StatusBar.currentHeight:0}}><StatusBar barStyle="dark-content" backgroundColor="#fff"/>
-<View style={{flexDirection:'row',alignItems:'center',justifyContent:'space-between',paddingHorizontal:22,paddingTop:9}}><Text style={{fontSize:22,fontWeight:'900',color:navy}}>BY<Text style={{color:orange}}>TALK</Text></Text><View style={{flexDirection:'row',alignItems:'center',gap:7}}><View style={{width:7,height:7,borderRadius:6,backgroundColor:backendUp?'#16c67a':'#f0b64a'}}/><Txt size={11} color={muted}>{backendUp?'Connected':'Offline demo'}</Txt></View></View>
-{screen==='onboard'&&<ScrollView contentContainerStyle={{padding:24,flexGrow:1}}><View style={{alignItems:'center',paddingVertical:30}}><Txt size={29} bold style={{textAlign:'center'}}>Your language{ '\n'}journey starts here</Txt><Txt color={muted} style={{textAlign:'center',marginTop:12}}>Connect with people around the world and learn through real conversations.</Txt><Text style={{fontSize:86,marginTop:25}}>🌍🗣️</Text></View><Field label="Your name" value={name} setValue={setName}/><Field label="My native language" value={nativeLanguage} setValue={setNativeLanguage}/><Field label="I want to learn" value={learningLanguage} setValue={setLearningLanguage}/><Field label="I am from" value={country} setValue={setCountry}/><Btn label="Next  →" onPress={()=>setScreen('level')} style={{marginTop:15}}/></ScrollView>}
-{screen==='level'&&<ScrollView contentContainerStyle={{padding:22}}><Header title="Choose your level" subtitle="Select your current level so we can find the best partners for you."/>{[['🌱','Beginner','I know a few basic words and phrases.'],['🍃','Elementary','I can have simple conversations.'],['📊','Intermediate','I can communicate in daily situations.'],['📘','Upper Intermediate','I can discuss familiar topics with confidence.'],['🎓','Advanced','I can express myself fluently.'],['👑','Proficient','I can communicate like a native.']].map(([emoji,n,desc])=><TouchableOpacity key={n} onPress={()=>setLevel(n)} style={{flexDirection:'row',alignItems:'center',padding:14,marginBottom:11,borderWidth:1.5,borderColor:level===n?orange:'#e6eaf0',borderRadius:13,backgroundColor:level===n?'#fff5f0':'#fff'}}><Txt size={28}>{emoji}</Txt><View style={{flex:1,marginLeft:15}}><Txt bold>{n}</Txt><Txt size={12} color={muted}>{desc}</Txt></View><Ionicons name={level===n?'radio-button-on':'radio-button-off'} color={level===n?orange:'#aab3c0'} size={22}/></TouchableOpacity>)}<Btn label={busy?'Saving...':'Continue  →'} onPress={()=>saveProfile('discover')}/></ScrollView>}
-{screen==='discover'&&<><Header title="Find your speaking partner" subtitle="Meet people from around the world and practice together."/><View style={{marginHorizontal:22,backgroundColor:light,borderRadius:12,paddingHorizontal:15,flexDirection:'row',alignItems:'center'}}><Ionicons name="search" size={19} color={muted}/><TextInput placeholder="Search by name, country, language..." value={search} onChangeText={setSearch} style={{flex:1,padding:13,color:navy}}/></View><ScrollView contentContainerStyle={{padding:22}}>{partners.filter(p=>[p.name,p.country,p.nativeLanguage,p.level].join(' ').toLowerCase().includes(search.toLowerCase())).map((p,i)=><View key={p.id} style={{flexDirection:'row',paddingVertical:13,borderBottomWidth:1,borderColor:'#f0f1f4',alignItems:'center'}}><View style={{width:53,height:53,borderRadius:30,backgroundColor:['#ffe0d3','#d6ebfc','#e8dafc'][i%3],alignItems:'center',justifyContent:'center'}}><Txt size={25}>{['👩🏻','👨🏽','👩🏻‍🦰','👨🏾','👩🏽'][i%5]}</Txt></View><View style={{flex:1,marginLeft:12}}><Txt bold>{p.name}  <Txt size={12} color={muted}>{p.country}</Txt></Txt><Txt size={11} color={muted}>Speaks: {p.nativeLanguage}, {p.learningLanguage}</Txt><Txt size={11} color="#368acb">{p.level}  ·  {p.learningLanguage}</Txt></View><TouchableOpacity onPress={()=>{setSelected(p);setScreen('chat')}} style={{borderWidth:1,borderColor:orange,borderRadius:15,padding:8}}><Txt color={orange} size={11}>Start chat</Txt></TouchableOpacity></View>)}</ScrollView></>}
-{screen==='chat'&&<><TouchableOpacity onPress={()=>setScreen('discover')} style={{padding:18,borderBottomWidth:1,borderColor:'#edf0f5',flexDirection:'row',alignItems:'center',gap:15}}><Ionicons name="arrow-back" size={22} color={navy}/><View><Txt size={18} bold>{selected.name}  <Txt size={13} color="#18b576">● Online</Txt></Txt><Txt size={12} color={muted}>{selected.country}</Txt></View></TouchableOpacity><ScrollView contentContainerStyle={{padding:16,flexGrow:1,justifyContent:'flex-end'}}>{messages.filter(m=>(m.from===selected.id&&m.to==='u1')||(m.from==='u1'&&m.to===selected.id)).map(m=><View key={m.id} style={{alignSelf:m.from==='u1'?'flex-end':'flex-start',maxWidth:'84%',marginBottom:12,backgroundColor:m.from==='u1'?'#ffe9dd':light,padding:15,borderRadius:15}}><Txt>{m.text}</Txt><Txt color={muted} size={10} style={{marginTop:6}}>{new Date(m.at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</Txt></View>)}</ScrollView><View style={{flexDirection:'row',alignItems:'center',padding:14,gap:10}}><TextInput placeholder="Type a message..." value={draft} onChangeText={setDraft} style={{backgroundColor:light,borderRadius:24,paddingHorizontal:18,paddingVertical:12,flex:1}}/><TouchableOpacity onPress={send} style={{backgroundColor:orange,padding:13,borderRadius:30}}><Ionicons name="send" color="#fff" size={20}/></TouchableOpacity></View></>}
-{screen==='rooms'&&<><Header title="Live speaking rooms" subtitle="Join live audio rooms to practice with people around the world."/><ScrollView contentContainerStyle={{paddingHorizontal:20}}><View style={{flexDirection:'row',gap:8,marginBottom:18}}>{['All','English','Travel','Culture','Study'].map(f=><TouchableOpacity key={f} onPress={()=>setFilter(f)} style={{backgroundColor:filter===f?orange:light,paddingHorizontal:12,paddingVertical:8,borderRadius:20}}><Txt size={12} color={filter===f?'#fff':navy}>{f}</Txt></TouchableOpacity>)}</View>{rooms.filter(r=>filter==='All'||r.topic===filter).map((room,i)=><View key={room.id} style={{borderWidth:1,borderColor:'#ecedf0',borderRadius:16,padding:16,marginBottom:14}}><View style={{flexDirection:'row',alignItems:'center',gap:12}}><View style={{backgroundColor:['#ffe3c9','#cde8fb','#e1f5e5','#e7ddfe'][i%4],borderRadius:10,padding:12}}><Txt size={21}>{['🎙️','✈️','🎬','💬'][i%4]}</Txt></View><View style={{flex:1}}><Txt bold>{room.name}</Txt><Txt size={12} color={muted}>{room.level}</Txt></View><Txt size={11} color="#16ac64">● Live now</Txt></View><Txt size={12} color={muted} style={{marginVertical:14}}>👥 {room.listeners+(room.joined||0)} listening</Txt><Btn label="Join room" onPress={()=>join(room)}/></View>)}</ScrollView></>}
-{screen==='dashboard'&&<ScrollView contentContainerStyle={{padding:22}}><View style={{alignItems:'center',marginTop:18,marginBottom:25}}><Txt size={56}>👨🏽‍💻</Txt><Txt size={21} bold>{name}</Txt><Txt color={muted}>Edit Profile · {country}</Txt></View><View style={{flexDirection:'row',justifyContent:'space-around',backgroundColor:light,padding:20,borderRadius:16,marginBottom:25}}>{[['🔥','12','day streak'],['🕒','180','speaking mins'],['⭐',String(28+vocab.length),'new words']].map(([emoji,n,label])=><View key={label} style={{alignItems:'center'}}><Txt size={22}>{emoji} {n}</Txt><Txt size={11} color={muted}>{label}</Txt></View>)}</View><Section title="Your progress"><View style={{backgroundColor:'#effaf5',borderRadius:15,padding:20}}><Txt size={23} bold color="#12a967">75% speaking goal</Txt><Txt size={13} color={muted}>150 / 200 minutes this week</Txt><View style={{marginTop:18,height:10,borderRadius:8,backgroundColor:'#d6e8db'}}><View style={{width:'75%',backgroundColor:'#13be71',height:10,borderRadius:8}}/></View></View></Section><Section title="Saved vocabulary"><View style={{flexDirection:'row',gap:8}}><TextInput value={word} onChangeText={setWord} placeholder="Add new vocabulary..." style={{flex:1,backgroundColor:light,borderRadius:12,padding:14}}/><Btn label="Add" onPress={addWord}/></View><Txt color={muted} size={13} style={{marginTop:12}}>{vocab.length} words saved</Txt>{vocab.map(v=><Txt key={v.id} style={{padding:7}}>📖 {v.word}</Txt>)}</Section><Section title="AI practice (coming soon)"><View style={{backgroundColor:light,padding:18,borderRadius:14}}><Txt>🤖 Practice a conversation about planning a trip.</Txt><Txt size={12} color={muted} style={{marginTop:6}}>Real AI voice feedback will require an additional service.</Txt></View></Section><Btn label="Update my level" outline onPress={()=>setScreen('level')}/></ScrollView>}
-{!['onboard','level'].includes(screen)&&<View style={{flexDirection:'row',borderTopWidth:1,borderColor:'#eef0f4',paddingVertical:11}}>{tabItems.map(([id,icon,label])=><TouchableOpacity key={id} onPress={()=>setScreen(id)} style={{flex:1,alignItems:'center',gap:4}}><Ionicons name={icon} size={21} color={screen===id?orange:'#98a3b3'}/><Txt size={10} color={screen===id?orange:muted}>{label}</Txt></TouchableOpacity>)}</View>}
-</SafeAreaView>}
-=======
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { LinearGradient } from 'expo-linear-gradient';
+import { createPeerConnection, getLocalMediaStream, makeIceCandidate, makeSessionDescription, setAudioRoute, startAudioRoute, stopAudioRoute, switchCamera } from './rtc';
+import CallVideo from './CallVideo';
+
+const welcomeImage = require('./assets/bytalk-welcome-art.png');
 
 // Secure storage adapter:
 // Uses Expo SecureStore on native builds (iOS / Android) and AsyncStorage on Web
@@ -143,7 +114,10 @@ export async function clearSession() {
 function getApiUrl() {
   // 1. Explicit environment variable override
   if (process.env.EXPO_PUBLIC_API_URL) {
-    return process.env.EXPO_PUBLIC_API_URL.replace(/\/+$/, '');
+    const configuredUrl = process.env.EXPO_PUBLIC_API_URL.replace(/\/+$/, '');
+    const isNativeLocalhost = Platform.OS !== 'web' && /:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(configuredUrl);
+    if (!isNativeLocalhost) return configuredUrl;
+    console.warn('[BYTALK] EXPO_PUBLIC_API_URL uses localhost on a native target; resolving the Expo host instead.');
   }
 
   // 2. Web browser runtime
@@ -194,7 +168,7 @@ const API = getApiUrl();
 
 // Section 3: Orange Design System Palette
 const COLORS = {
-  primary: '#FF6B35',
+  primary: '#FF693D',
   secondary: '#FF8A50',
   lightBg: '#FFF7F2',
   softSurface: '#FFF0E8',
@@ -212,14 +186,6 @@ const navy = COLORS.textPrimary;
 const muted = COLORS.textSecondary;
 const light = COLORS.lightBg;
 const border = COLORS.border;
-
-const fallbackPartners = [
-  { id: 'u2', name: 'Yuki', country: 'Japan', nativeLanguage: 'Japanese', learningLanguage: 'English', level: 'Intermediate', online: true },
-  { id: 'u3', name: 'Lucas', country: 'Brazil', nativeLanguage: 'Portuguese', learningLanguage: 'English', level: 'Beginner', online: true },
-  { id: 'u4', name: 'Minji', country: 'South Korea', nativeLanguage: 'Korean', learningLanguage: 'English', level: 'Intermediate', online: true },
-  { id: 'u5', name: 'Carlos', country: 'Mexico', nativeLanguage: 'Spanish', learningLanguage: 'English', level: 'Intermediate', online: true },
-  { id: 'u6', name: 'Aditi', country: 'India', nativeLanguage: 'Hindi', learningLanguage: 'English', level: 'Beginner', online: true },
-];
 
 const fallbackRooms = [
   { id: 'r1', name: 'Everyday English', topic: 'English', level: 'Beginner - Intermediate', listeners: 24 },
@@ -316,18 +282,24 @@ const Section = ({ title, children }) => (
 );
 
 function App() {
+  const { height: viewportHeight } = useWindowDimensions();
+  const isShortViewport = viewportHeight < 560;
+  const welcomeIllustrationHeight = Math.max(110, Math.min(180, viewportHeight * 0.34));
   const [screen, setScreen] = useState('welcome');
   const [sessionChecking, setSessionChecking] = useState(true);
-  const [userId, setUserId] = useState('u1');
-  const [name, setName] = useState('Pavan Nerkar');
-  const [country, setCountry] = useState('India');
-  const [nativeLanguage, setNativeLanguage] = useState('Hindi');
+  const [userId, setUserId] = useState(null);
+  const [name, setName] = useState('');
+  const [country, setCountry] = useState('');
+  const [nativeLanguage, setNativeLanguage] = useState('');
   const [learningLanguage, setLearningLanguage] = useState('English');
   const [level, setLevel] = useState('Beginner');
-  const [partners, setPartners] = useState(fallbackPartners);
+  const [partners, setPartners] = useState([]);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [discoverRefreshing, setDiscoverRefreshing] = useState(false);
+  const [discoverError, setDiscoverError] = useState('');
   const [rooms, setRooms] = useState(fallbackRooms);
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState(fallbackPartners[0]);
+  const [selected, setSelected] = useState({ id: null, name: 'BYTALK' });
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState('');
   const [filter, setFilter] = useState('All');
@@ -335,6 +307,37 @@ function App() {
   const [word, setWord] = useState('');
   const [backendUp, setBackendUp] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const [messageLoading, setMessageLoading] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [chatError, setChatError] = useState('');
+  const [typing, setTyping] = useState(false);
+  const [call, setCall] = useState(null);
+  const [callHistory, setCallHistory] = useState([]);
+  const [callHistoryError, setCallHistoryError] = useState('');
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const [callDuration, setCallDuration] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const [cameraEnabled, setCameraEnabled] = useState(true);
+  const [speakerEnabled, setSpeakerEnabled] = useState(false);
+  const [callNotice, setCallNotice] = useState('');
+  const [callStarting, setCallStarting] = useState(null);
+  const socketRef = useRef(null);
+  const peerRef = useRef(null);
+  const callRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const iceServersRef = useRef([]);
+  const pendingIceRef = useRef([]);
+  const selectedRef = useRef(selected);
+  const typingTimerRef = useRef(null);
+  const callExitTimerRef = useRef(null);
+  const partnersRef = useRef(partners);
+  const discoverRequestRef = useRef(0);
+  selectedRef.current = selected;
+  callRef.current = call;
+  partnersRef.current = partners;
 
   // Auth form states
   const [loginEmail, setLoginEmail] = useState('');
@@ -373,19 +376,297 @@ function App() {
     try {
       const isUp = await checkHealth();
       if (isUp) {
-        const [p, r, v] = await Promise.all([
-          request('partners'),
+        const [r, v] = await Promise.all([
           request('rooms'),
-          request(`vocabulary/${userId}`).catch(() => []),
+          activeAuthToken ? request(`vocabulary/${userId}`).catch(() => []) : Promise.resolve([]),
         ]);
-        setPartners(p);
         setRooms(r);
         setVocab(v);
+        if (activeAuthToken) await loadDiscoverUsers(true);
       }
     } catch {
       setBackendUp(false);
     }
   };
+
+  async function loadDiscoverUsers(refreshing = false) {
+    const requestId = ++discoverRequestRef.current;
+    if (!activeAuthToken) {
+      setPartners([]);
+      setDiscoverError('Sign in to discover registered BYTALK users.');
+      setDiscoverLoading(false);
+      setDiscoverRefreshing(false);
+      return;
+    }
+
+    if (refreshing) setDiscoverRefreshing(true);
+    else if (!partnersRef.current.length) setDiscoverLoading(true);
+    setDiscoverError('');
+    try {
+      const users = await request('users/discover');
+      if (requestId !== discoverRequestRef.current) return;
+      setPartners(Array.isArray(users) ? users : []);
+      setDiscoverError('');
+    } catch (error) {
+      if (requestId !== discoverRequestRef.current) return;
+      setDiscoverError(error.message || 'Could not load registered users. Check your connection and retry.');
+      if (error.status === 401) {
+        setPartners([]);
+        setSessionVersion((value) => value + 1);
+        setScreen('welcome');
+      }
+    } finally {
+      if (requestId === discoverRequestRef.current) {
+        setDiscoverLoading(false);
+        setDiscoverRefreshing(false);
+      }
+    }
+  }
+
+  function updateCall(next) {
+    setCall((previous) => {
+      const value = typeof next === 'function' ? next(previous) : next;
+      callRef.current = value;
+      return value;
+    });
+  }
+
+  function releaseCallMedia() {
+    const connection = peerRef.current?.connection;
+    if (connection) {
+      connection.onicecandidate = null;
+      connection.ontrack = null;
+      connection.onconnectionstatechange = null;
+      connection.oniceconnectionstatechange = null;
+      connection.close();
+    }
+    peerRef.current = null;
+    pendingIceRef.current = [];
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    localStreamRef.current = null;
+    setLocalStream(null);
+    setRemoteStream(null);
+    stopAudioRoute();
+    setMuted(false);
+    setCameraEnabled(true);
+    setSpeakerEnabled(false);
+  }
+
+  function createCallPeer(callId, stream, iceServers) {
+    const connection = createPeerConnection(iceServers);
+    stream.getTracks().forEach((track) => connection.addTrack(track, stream));
+    peerRef.current = { callId, connection };
+    connection.onicecandidate = (event) => {
+      if (event.candidate && peerRef.current?.callId) {
+        socketRef.current?.emit('call:signal', {
+          callId: peerRef.current.callId,
+          kind: 'ice',
+          signal: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate,
+        });
+      }
+    };
+    connection.ontrack = (event) => {
+      if (event.streams?.[0]) setRemoteStream(event.streams[0]);
+    };
+    const updateConnectionState = () => {
+      const state = connection.connectionState || connection.iceConnectionState;
+      if (state === 'connected' || state === 'completed') {
+        updateCall((previous) => previous ? { ...previous, status: 'Connected', connectedAt: previous.connectedAt || new Date().toISOString() } : previous);
+        socketRef.current?.emit('call:connected', { callId: peerRef.current?.callId });
+      } else if (state === 'disconnected' || state === 'checking') {
+        updateCall((previous) => previous ? { ...previous, status: 'Reconnecting' } : previous);
+      } else if (state === 'failed') {
+        const notice = 'The media connection failed. Check your network or TURN server configuration.';
+        setCallNotice(notice);
+        endCall(notice);
+      }
+    };
+    connection.onconnectionstatechange = updateConnectionState;
+    connection.oniceconnectionstatechange = updateConnectionState;
+    return connection;
+  }
+
+  async function createCallOffer(callId) {
+    try {
+      const connection = peerRef.current?.connection;
+      if (!connection || peerRef.current.callId !== callId) return;
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      socketRef.current?.emit('call:signal', { callId, kind: 'offer', signal: connection.localDescription || offer });
+      updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
+    } catch (error) {
+      setCallNotice(error.message || 'Could not start the media connection.');
+    }
+  }
+
+  async function handleCallSignal({ callId, kind, signal }) {
+    const connection = peerRef.current?.connection;
+    if (!connection || peerRef.current.callId !== callId) return;
+    try {
+      if (kind === 'offer') {
+        await connection.setRemoteDescription(makeSessionDescription(signal));
+        for (const candidate of pendingIceRef.current.splice(0)) {
+          await connection.addIceCandidate(makeIceCandidate(candidate));
+        }
+        const answer = await connection.createAnswer();
+        await connection.setLocalDescription(answer);
+        socketRef.current?.emit('call:signal', { callId, kind: 'answer', signal: connection.localDescription || answer });
+        updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
+      } else if (kind === 'answer') {
+        await connection.setRemoteDescription(makeSessionDescription(signal));
+        for (const candidate of pendingIceRef.current.splice(0)) {
+          await connection.addIceCandidate(makeIceCandidate(candidate));
+        }
+      } else if (kind === 'ice') {
+        if (connection.remoteDescription) {
+          await connection.addIceCandidate(makeIceCandidate(signal));
+        } else {
+          pendingIceRef.current.push(signal);
+        }
+      }
+    } catch (error) {
+      setCallNotice(error.message || 'Could not negotiate the media connection.');
+    }
+  }
+
+  function finishCallLocally(status, notice = '') {
+    if (callExitTimerRef.current) clearTimeout(callExitTimerRef.current);
+    setCallNotice(notice);
+    releaseCallMedia();
+    updateCall((previous) => previous ? { ...previous, status } : previous);
+    request('calls').then(setCallHistory).catch((error) => {
+      setCallHistoryError(error.message || 'Call ended, but call history could not be refreshed.');
+    });
+    callExitTimerRef.current = setTimeout(() => {
+      updateCall(null);
+      setScreen('discover');
+    }, 1800);
+  }
+
+  function emitWithAck(event, payload) {
+    return new Promise((resolve, reject) => {
+      const socket = socketRef.current;
+      if (!socket?.connected) {
+        reject(new Error('Real-time service is disconnected. Reconnect and try again.'));
+        return;
+      }
+      socket.timeout(12000).emit(event, payload, (timeoutError, response) => {
+        if (timeoutError) {
+          reject(new Error('The server did not respond. Please try again.'));
+        } else if (response?.error) {
+          reject(new Error(response.error));
+        } else {
+          resolve(response || {});
+        }
+      });
+    });
+  }
+
+  async function startCall(partner, type) {
+    console.log('[BYTALK call] button pressed', { partnerId: partner?.id, type });
+    if (!activeAuthToken) {
+      Alert.alert('Sign in required', 'Sign in before starting a private call.');
+      return;
+    }
+    if (!socketRef.current?.connected) {
+      Alert.alert('Call unavailable', 'The real-time service is disconnected. Please reconnect and try again.');
+      return;
+    }
+    setCallStarting({ partnerId: partner.id, type });
+    setCallNotice('Requesting microphone and camera permission…');
+    try {
+      console.log('[BYTALK call] requesting media', { type });
+      const rtcConfig = await request('rtc-config');
+      iceServersRef.current = rtcConfig.iceServers || [];
+      const stream = await getLocalMediaStream(type);
+      console.log('[BYTALK call] media ready', {
+        audio: stream.getAudioTracks().length,
+        video: stream.getVideoTracks().length,
+      });
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      const initialCall = { id: null, peer: partner, type, direction: 'outgoing', status: 'Calling' };
+      updateCall(initialCall);
+      setCallNotice(type === 'video' && !stream.getVideoTracks().length
+        ? 'Camera unavailable; this call will continue with audio only.'
+        : '');
+      setCameraEnabled(stream.getVideoTracks().length > 0);
+      setSelected(partner);
+      setScreen('call');
+      const speaker = type === 'video';
+      startAudioRoute(type, speaker);
+      setSpeakerEnabled(speaker);
+      createCallPeer(null, stream, iceServersRef.current);
+      console.log('[BYTALK call] sending call:invite', { to: partner.id, type });
+      const result = await emitWithAck('call:invite', { to: partner.id, type });
+      console.log('[BYTALK call] invite acknowledged', { callId: result.callId });
+      if (!peerRef.current || callRef.current?.peer.id !== partner.id || callRef.current?.status === 'Ended') {
+        socketRef.current?.emit('call:end', { callId: result.callId });
+        return;
+      }
+      peerRef.current.callId = result.callId;
+      updateCall((previous) => previous ? { ...previous, id: result.callId, status: 'Ringing' } : previous);
+    } catch (error) {
+      console.warn('[BYTALK call] failed', error.message || error);
+      releaseCallMedia();
+      updateCall(null);
+      setScreen('discover');
+      Alert.alert('Could not start call', error.message || 'Check your connection and permissions.');
+    } finally {
+      setCallStarting(null);
+    }
+  }
+
+  async function acceptCall() {
+    const incoming = callRef.current;
+    if (!incoming?.id || incoming.direction !== 'incoming') return;
+    try {
+      const rtcConfig = await request('rtc-config');
+      iceServersRef.current = rtcConfig.iceServers || [];
+      const stream = await getLocalMediaStream(incoming.type);
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      setCameraEnabled(stream.getVideoTracks().length > 0);
+      if (incoming.type === 'video' && !stream.getVideoTracks().length) {
+        setCallNotice('Camera unavailable; accepting with audio only.');
+      }
+      const speaker = incoming.type === 'video';
+      startAudioRoute(incoming.type, speaker);
+      setSpeakerEnabled(speaker);
+      createCallPeer(incoming.id, stream, iceServersRef.current);
+      await emitWithAck('call:accept', { callId: incoming.id });
+      updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
+    } catch (error) {
+      releaseCallMedia();
+      socketRef.current?.emit('call:reject', { callId: incoming.id });
+      finishCallLocally('Ended', error.message || 'Could not accept this call.');
+    }
+  }
+
+  async function rejectCall() {
+    const incoming = callRef.current;
+    if (!incoming?.id) return;
+    let notice = '';
+    try {
+      await emitWithAck('call:reject', { callId: incoming.id });
+    } catch (error) {
+      notice = error.message;
+    }
+    finishCallLocally('Ended', notice);
+  }
+
+  async function endCall(notice = '') {
+    const currentCall = callRef.current;
+    if (!currentCall) return;
+    if (currentCall.id) {
+      try {
+        await emitWithAck('call:end', { callId: currentCall.id });
+      } catch (error) {
+        notice = notice ? `${notice} ${error.message}` : error.message;
+      }
+    }
+    finishCallLocally('Ended', notice);
+  }
 
   // RESTORE SESSION ON APP OPEN (Requirement 7 & 11)
   useEffect(() => {
@@ -444,24 +725,165 @@ function App() {
     restoreSession();
     refresh();
 
-    const socket = io(API, { transports: ['websocket', 'polling'] });
-    socket.on('message:new', (m) => {
-      setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
-    });
-    socket.on('rooms:changed', setRooms);
     return () => {
       active = false;
-      socket.disconnect();
+      socketRef.current?.emit('typing:stop', { to: selected.id });
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     };
   }, []);
 
   useEffect(() => {
-    if (screen === 'chat') {
-      request(`messages/${userId}/${selected.id}`)
-        .then(setMessages)
-        .catch(() => setMessages([]));
+    if (sessionChecking) return undefined;
+    let active = true;
+    let socket;
+
+    async function connectSocket() {
+      const token = activeAuthToken || await authStorage.getItem(SESSION_TOKEN_KEY);
+      if (!active || !token) return;
+      socket = io(API, { auth: { token }, transports: ['websocket', 'polling'] });
+      socketRef.current = socket;
+      socket.on('connect', () => {
+        console.log('[BYTALK socket] connected', { api: API });
+        loadDiscoverUsers();
+        const connection = peerRef.current?.connection;
+        if (callRef.current?.id && connection?.connectionState === 'connected') {
+          socket.emit('call:connected', { callId: callRef.current.id });
+        }
+      });
+      socket.on('connect_error', (error) => {
+        console.warn('[BYTALK socket] connection error', error.message);
+        if (active) setChatError(error.message || 'Could not connect to messaging.');
+        if (active) setCallNotice(`Call service unavailable: ${error.message || 'connection failed'}`);
+      });
+      socket.on('message:new', (message) => {
+        if (message.from !== userId && message.to !== userId) return;
+        setMessages((previous) => previous.some((item) => item.id === message.id) ? previous : [...previous, message]);
+      });
+      socket.on('message:status', (status) => {
+        setMessages((previous) => previous.map((message) => message.id === status.id ? { ...message, ...status } : message));
+      });
+      socket.on('rooms:changed', setRooms);
+      socket.on('presence:update', ({ userId: changedId, online }) => {
+        setPartners((previous) => previous.map((partner) => partner.id === changedId ? { ...partner, online } : partner));
+        setSelected((previous) => previous.id === changedId ? { ...previous, online } : previous);
+      });
+      socket.on('typing:update', ({ from, typing: isTyping }) => {
+        if (from === selectedRef.current.id) setTyping(Boolean(isTyping));
+      });
+      socket.on('call:incoming', (incoming) => {
+        console.log('[BYTALK call] incoming call received', { callId: incoming.callId, type: incoming.type });
+        const peer = partnersRef.current.find((partner) => partner.id === incoming.caller.id) || incoming.caller;
+        setSelected(peer);
+        updateCall({
+          id: incoming.callId,
+          peer,
+          type: incoming.type,
+          direction: 'incoming',
+          status: 'Ringing',
+        });
+        setCallNotice('');
+        setScreen('call');
+      });
+      socket.on('call:accepted', ({ callId }) => {
+        console.log('[BYTALK call] call accepted', { callId });
+        if (callRef.current?.id === callId) createCallOffer(callId);
+      });
+      socket.on('call:signal', (signal) => handleCallSignal(signal));
+      socket.on('call:state', ({ callId, status, connectedAt }) => {
+        if (callRef.current?.id !== callId) return;
+        const title = status === 'connected' ? 'Connected' : 'Reconnecting';
+        updateCall((previous) => previous ? { ...previous, status: title, connectedAt: connectedAt || previous.connectedAt } : previous);
+      });
+      socket.on('call:missed', ({ callId }) => {
+        if (callRef.current?.id === callId) finishCallLocally('Missed', 'This call was not answered.');
+      });
+      socket.on('call:rejected', ({ callId }) => {
+        if (callRef.current?.id === callId) finishCallLocally('Ended', 'The call was declined.');
+      });
+      socket.on('call:ended', ({ callId, status, reason }) => {
+        console.log('[BYTALK call] call ended', { callId, status, reason });
+        if (callRef.current?.id !== callId) return;
+        const message = reason === 'disconnected'
+          ? 'The other user disconnected.'
+          : reason === 'connection-timeout'
+            ? 'The media connection could not be established.'
+            : '';
+        finishCallLocally(status === 'missed' ? 'Missed' : 'Ended', message);
+      });
     }
+
+    connectSocket().catch((error) => {
+      if (active) setChatError(error.message || 'Could not connect to messaging.');
+    });
+    return () => {
+      active = false;
+      if (socketRef.current === socket) socketRef.current = null;
+      socket?.disconnect();
+    };
+  }, [sessionChecking, sessionVersion, userId]);
+
+  useEffect(() => {
+    if (!sessionChecking && screen === 'discover') loadDiscoverUsers();
+  }, [screen, sessionChecking, sessionVersion, userId]);
+
+  useEffect(() => {
+    if (screen === 'chat') {
+      let active = true;
+      setMessageLoading(true);
+      setChatError('');
+      setTyping(false);
+      request(`messages/${userId}/${selected.id}`)
+        .then((history) => {
+          if (active) {
+            setMessages((previous) => {
+              const merged = new Map(previous.map((message) => [message.id, message]));
+              history.forEach((message) => merged.set(message.id, message));
+              return [...merged.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+            });
+            setHasOlderMessages(history.length === 100);
+            setTyping(false);
+          }
+        })
+        .catch((error) => {
+          if (active) setChatError(error.message || 'Could not load this conversation.');
+        })
+        .finally(() => {
+          if (active) setMessageLoading(false);
+        });
+      return () => {
+        active = false;
+      };
+    }
+    return undefined;
   }, [selected, screen, userId]);
+
+  useEffect(() => {
+    if (screen === 'dashboard' && activeAuthToken) {
+      setCallHistoryError('');
+      request('calls').then(setCallHistory).catch((error) => {
+        setCallHistoryError(error.message || 'Could not load call history.');
+      });
+    }
+  }, [screen, sessionVersion]);
+
+  useEffect(() => () => {
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    if (callExitTimerRef.current) clearTimeout(callExitTimerRef.current);
+    peerRef.current?.connection?.close();
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    stopAudioRoute();
+  }, []);
+
+  useEffect(() => {
+    if (call?.status !== 'Connected' || !call.connectedAt) {
+      setCallDuration(0);
+      return undefined;
+    }
+    const updateDuration = () => setCallDuration(Math.max(0, Math.floor((Date.now() - Date.parse(call.connectedAt)) / 1000)));
+    updateDuration();
+    const timer = setInterval(updateDuration, 1000);
+    return () => clearInterval(timer);
+  }, [call?.status, call?.connectedAt]);
 
   // LOGIN HANDLER
   const handleLogin = async () => {
@@ -490,6 +912,7 @@ function App() {
 
       if (res && res.token && res.user) {
         await saveSession(res, res.user.name || '');
+        setSessionVersion((value) => value + 1);
         if (res.user.id) setUserId(res.user.id);
         if (res.user.name) setName(res.user.name);
         if (res.user.country) setCountry(res.user.country);
@@ -507,6 +930,10 @@ function App() {
         setLoginError(err.message);
       } else if (err.status === 404) {
         setLoginError('Server error: Login endpoint (/api/login) is not implemented on the backend.');
+      } else if (err.status === 401) {
+        setLoginError('Incorrect email or password.');
+      } else if (err.status >= 500) {
+        setLoginError('The authentication service is unavailable. Please try again.');
       } else {
         setLoginError(err.message || 'Unable to sign in. Please verify credentials.');
       }
@@ -564,6 +991,7 @@ function App() {
       if (res && res.token && res.user) {
         // Automatically save session and sign in for 15 days
         await saveSession(res, nameTrimmed);
+        setSessionVersion((value) => value + 1);
         if (res.user.id) setUserId(res.user.id);
         setName(nameTrimmed);
         setRegPassword('');
@@ -590,8 +1018,15 @@ function App() {
   // LOGOUT HANDLER (Requirement 9)
   const handleLogout = async () => {
     await clearSession();
-    setUserId('u1');
-    setName('Pavan Nerkar');
+    setSessionVersion((value) => value + 1);
+    setUserId(null);
+    setName('');
+    setCountry('');
+    setNativeLanguage('');
+    setLearningLanguage('English');
+    setLevel('Beginner');
+    setPartners([]);
+    setMessages([]);
     setScreen('welcome');
   };
 
@@ -617,13 +1052,52 @@ function App() {
     try {
       const result = await request('messages', {
         method: 'POST',
-        body: JSON.stringify({ from: userId, to: selected.id, text }),
+        body: JSON.stringify({ to: selected.id, text }),
       });
       setMessages((prev) => (prev.some((x) => x.id === result.id) ? prev : [...prev, result]));
-    } catch {
-      Alert.alert('Failed to send', 'Connect mobile to backend first.');
+      setChatError('');
+      socketRef.current?.emit('typing:stop', { to: selected.id });
+    } catch (error) {
+      setChatError(error.message || 'Message could not be sent. Check your connection and try again.');
       setDraft(text);
     }
+
+    async function loadEarlierMessages() {
+      const conversation = messages
+        .filter((message) => (message.from === selected.id && message.to === userId) || (message.from === userId && message.to === selected.id))
+        .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+      const oldest = conversation[0];
+      if (!oldest || loadingOlderMessages) return;
+      setLoadingOlderMessages(true);
+      try {
+        const history = await request(`messages/${userId}/${selected.id}?limit=100&before=${encodeURIComponent(oldest.at)}`);
+        setMessages((previous) => {
+          const merged = new Map(previous.map((message) => [message.id, message]));
+          history.forEach((message) => merged.set(message.id, message));
+          return [...merged.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+        });
+        setHasOlderMessages(history.length === 100);
+      } catch (error) {
+        setChatError(error.message || 'Could not load earlier messages.');
+      } finally {
+        setLoadingOlderMessages(false);
+      }
+    }
+  }
+
+  function updateDraft(text) {
+    setDraft(text);
+    const socket = socketRef.current;
+    if (!socket?.connected) return;
+    if (!text.trim()) {
+      socket.emit('typing:stop', { to: selected.id });
+      return;
+    }
+    socket.emit('typing:start', { to: selected.id });
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = setTimeout(() => {
+      socket.emit('typing:stop', { to: selected.id });
+    }, 1400);
   }
 
   async function join(room) {
@@ -656,6 +1130,12 @@ function App() {
     ['chat', 'chatbubbles', 'Messages'],
     ['dashboard', 'bar-chart', 'Profile'],
   ];
+  const filteredPartners = partners.filter((partner) =>
+    [partner.displayName, partner.name, partner.country, partner.nativeLanguage, partner.learningLanguage, partner.level]
+      .join(' ')
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  );
 
   const Header = ({ title, subtitle, onBack }) => (
     <View style={{ paddingHorizontal: 22, paddingTop: 14, paddingBottom: 14 }}>
@@ -696,7 +1176,7 @@ function App() {
       <SafeAreaView style={[styles.safeArea, { justifyContent: 'center', alignItems: 'center' }]}>
         <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
         <View style={{ alignItems: 'center' }}>
-          <Image source={require('./assets/logo_icon.png')} style={{ width: 44, height: 44, marginBottom: 14 }} resizeMode="contain" />
+          <Text style={{ fontSize: 38, fontWeight: '900', color: COLORS.primary, marginBottom: 14 }}>BT</Text>
           <ActivityIndicator size="large" color={COLORS.primary} />
           <Txt color={COLORS.textSecondary} size={13} style={{ marginTop: 12 }}>Restoring session...</Txt>
         </View>
@@ -716,7 +1196,7 @@ function App() {
           {!['welcome', 'login', 'register'].includes(screen) && (
             <View style={styles.topBar}>
               <TouchableOpacity onPress={() => setScreen('welcome')} style={styles.logoRowSmall}>
-                <Image source={require('./assets/logo_icon.png')} style={{ width: 22, height: 22, marginRight: 6 }} resizeMode="contain" />
+                <Text style={{ fontSize: 20, fontWeight: '900', color: COLORS.primary, marginRight: 6 }}>BT</Text>
                 <Text style={{ fontSize: 20, fontWeight: '900', color: navy }}>
                   BY<Text style={{ color: orange }}>TALK</Text>
                 </Text>
@@ -736,7 +1216,10 @@ function App() {
           {/* SCREEN 1: WELCOME SCREEN */}
           {screen === 'welcome' && (
             <ScrollView
-              contentContainerStyle={styles.welcomeScrollContainer}
+              contentContainerStyle={[
+                styles.welcomeScrollContainer,
+                isShortViewport && { justifyContent: 'flex-start' },
+              ]}
               showsVerticalScrollIndicator={false}
               bounces={false}
               keyboardShouldPersistTaps="handled"
@@ -744,11 +1227,9 @@ function App() {
               {/* Brand Header */}
               <View style={styles.welcomeHeader}>
                 <View style={styles.brandRow}>
-                  <Image
-                    source={require('./assets/logo_icon.png')}
-                    style={styles.logoIconLarge}
-                    resizeMode="contain"
-                  />
+                  <View style={{ width: 40, height: 40, alignItems: 'center', justifyContent: 'center' }}>
+                    <Ionicons name="chatbubble-ellipses" size={34} color={COLORS.primary} />
+                  </View>
                   <Text style={styles.brandTitle}>
                     BY<Text style={{ color: COLORS.primary }}>TALK</Text>
                   </Text>
@@ -765,11 +1246,22 @@ function App() {
               </View>
 
               {/* Hero Illustration */}
-              <View style={styles.heroIllustrationContainer}>
+              <View
+                style={[
+                  styles.heroIllustrationContainer,
+                  {
+                    flexGrow: isShortViewport ? 0 : 1,
+                    height: isShortViewport ? welcomeIllustrationHeight : undefined,
+                    minHeight: isShortViewport ? welcomeIllustrationHeight : 230,
+                    maxHeight: Math.min(420, viewportHeight * 0.48),
+                  },
+                ]}
+              >
                 <Image
-                  source={require('./assets/hero_illustration.png')}
+                  source={welcomeImage}
                   style={styles.heroIllustrationImage}
                   resizeMode="contain"
+                  accessibilityLabel="BYTALK language partner welcome illustration"
                 />
               </View>
 
@@ -829,14 +1321,12 @@ function App() {
 
               {/* Centered Brand Header */}
               <View style={styles.authBrandHeader}>
-                <Image
-                  source={require('./assets/logo_icon.png')}
-                  style={styles.authLogoIcon}
-                  resizeMode="contain"
-                />
-                <Text style={styles.authBrandTitle}>
-                  BY<Text style={{ color: COLORS.primary }}>TALK</Text>
-                </Text>
+                <View style={styles.authBrandRow}>
+                  <Ionicons name="chatbubble-ellipses" size={36} color={COLORS.primary} />
+                  <Text style={styles.authBrandTitle}>
+                    BY<Text style={{ color: COLORS.primary }}>TALK</Text>
+                  </Text>
+                </View>
                 <Text style={styles.authBrandSubtitle}>Talk  •  Learn  •  Connect</Text>
               </View>
 
@@ -960,20 +1450,20 @@ function App() {
                     )}
                   </LinearGradient>
                 </TouchableOpacity>
+              </View>
 
-                {/* Bottom Link to Registration */}
-                <View style={styles.footerLinkRow}>
-                  <Text style={styles.footerLabel}>Don't have an account? </Text>
-                  <TouchableOpacity
-                    onPress={() => {
-                      setLoginError('');
-                      setScreen('register');
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.footerLinkBold}>Sign Up</Text>
-                  </TouchableOpacity>
-                </View>
+              {/* Bottom Link to Registration */}
+              <View style={[styles.footerLinkRow, styles.authFooterLinkRow]}>
+                <Text style={styles.footerLabel}>Don't have an account? </Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    setLoginError('');
+                    setScreen('register');
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.footerLinkBold}>Sign Up</Text>
+                </TouchableOpacity>
               </View>
             </ScrollView>
           )}
@@ -1006,14 +1496,12 @@ function App() {
 
               {/* Centered Brand Header */}
               <View style={styles.authBrandHeader}>
-                <Image
-                  source={require('./assets/logo_icon.png')}
-                  style={styles.authLogoIcon}
-                  resizeMode="contain"
-                />
-                <Text style={styles.authBrandTitle}>
-                  BY<Text style={{ color: COLORS.primary }}>TALK</Text>
-                </Text>
+                <View style={styles.authBrandRow}>
+                  <Ionicons name="chatbubble-ellipses" size={36} color={COLORS.primary} />
+                  <Text style={styles.authBrandTitle}>
+                    BY<Text style={{ color: COLORS.primary }}>TALK</Text>
+                  </Text>
+                </View>
                 <Text style={styles.authBrandSubtitle}>Talk  •  Learn  •  Connect</Text>
               </View>
 
@@ -1199,20 +1687,20 @@ function App() {
                     )}
                   </LinearGradient>
                 </TouchableOpacity>
+              </View>
 
-                {/* Bottom Link to Login */}
-                <View style={styles.footerLinkRow}>
-                  <Text style={styles.footerLabel}>Already have an account? </Text>
-                  <TouchableOpacity
-                    onPress={() => {
-                      setRegError('');
-                      setScreen('login');
-                    }}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={styles.footerLinkBold}>Sign In</Text>
-                  </TouchableOpacity>
-                </View>
+              {/* Bottom Link to Login */}
+              <View style={[styles.footerLinkRow, styles.authFooterLinkRow]}>
+                <Text style={styles.footerLabel}>Already have an account? </Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    setRegError('');
+                    setScreen('login');
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.footerLinkBold}>Sign In</Text>
+                </TouchableOpacity>
               </View>
             </ScrollView>
           )}
@@ -1298,34 +1786,126 @@ function App() {
                   style={{ flex: 1, padding: 12, color: navy, fontSize: 14 }}
                 />
               </View>
-              <ScrollView contentContainerStyle={{ padding: 22 }}>
-                {partners
-                  .filter((p) => [p.name, p.country, p.nativeLanguage, p.level].join(' ').toLowerCase().includes(search.toLowerCase()))
-                  .map((p, i) => (
+              <ScrollView
+                contentContainerStyle={{ padding: 22, flexGrow: 1 }}
+                refreshControl={
+                  <RefreshControl
+                    refreshing={discoverRefreshing}
+                    onRefresh={() => loadDiscoverUsers(true)}
+                    tintColor={orange}
+                    colors={[orange]}
+                  />
+                }
+              >
+                {discoverError ? (
+                  <View style={styles.discoverMessage}>
+                    <Txt color={COLORS.error} size={13} style={{ textAlign: 'center' }}>{discoverError}</Txt>
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      accessibilityLabel="Retry loading registered users"
+                      onPress={() => loadDiscoverUsers(true)}
+                      style={styles.discoverRetry}
+                    >
+                      <Ionicons name="refresh" size={16} color={orange} />
+                      <Txt color={orange} size={13} bold>Retry</Txt>
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
+                {discoverLoading && partners.length === 0 ? (
+                  <View style={styles.discoverMessage}>
+                    <ActivityIndicator color={orange} />
+                    <Txt size={13} color={muted} style={{ marginTop: 10 }}>Finding registered users…</Txt>
+                  </View>
+                ) : null}
+                {!discoverLoading && !discoverError && partners.length === 0 ? (
+                  <View style={styles.discoverMessage}>
+                    <Ionicons name="people-outline" size={34} color={muted} />
+                    <Txt size={14} color={muted} style={{ marginTop: 10, textAlign: 'center' }}>
+                      No other registered users yet. Pull down to refresh.
+                    </Txt>
+                  </View>
+                ) : null}
+                {!discoverLoading && !discoverError && partners.length > 0 && filteredPartners.length === 0 ? (
+                  <View style={styles.discoverMessage}>
+                    <Txt size={14} color={muted} style={{ textAlign: 'center' }}>No users match “{search}”. Try a different search.</Txt>
+                  </View>
+                ) : null}
+                {filteredPartners.map((p) => (
                     <View key={p.id} style={styles.partnerCard}>
-                      <View style={[styles.avatarCircle, { backgroundColor: ['#FFE0D3', '#D6EBFC', '#FFE8D9'][i % 3] }]}>
-                        <Txt size={25}>{['👩🏻', '👨🏽', '👩🏻‍🦰', '👨🏾', '👩🏽'][i % 5]}</Txt>
+                      <View style={styles.partnerInfoRow}>
+                        <View style={[styles.avatarCircle, { backgroundColor: '#FFE0D3' }]}>
+                          {p.avatarUrl ? (
+                            <Image
+                              source={{ uri: p.avatarUrl }}
+                              accessibilityLabel={`${p.displayName || p.name} profile photo`}
+                              style={styles.partnerAvatarImage}
+                            />
+                          ) : (
+                            <Txt size={20} bold color={orange}>{(p.displayName || p.name || '?').trim().charAt(0).toUpperCase()}</Txt>
+                          )}
+                        </View>
+                        <View style={{ flex: 1, marginLeft: 12 }}>
+                          <Txt bold size={15}>
+                            {p.displayName || p.name}  <Txt size={12} color={muted}>{p.country}</Txt>
+                          </Txt>
+                          <Txt size={11} color={muted} style={{ marginTop: 2 }}>
+                            Speaks: {p.nativeLanguage}, {p.learningLanguage}
+                          </Txt>
+                          <Txt size={11} color={COLORS.primary} style={{ marginTop: 2, fontWeight: '600' }}>
+                            {p.level}  ·  {p.learningLanguage}
+                          </Txt>
+                          <Txt size={10} color={p.online ? COLORS.success : muted} style={{ marginTop: 3 }}>
+                            {p.online ? '● Online' : '● Offline'}
+                          </Txt>
+                        </View>
                       </View>
-                      <View style={{ flex: 1, marginLeft: 12 }}>
-                        <Txt bold size={15}>
-                          {p.name}  <Txt size={12} color={muted}>{p.country}</Txt>
-                        </Txt>
-                        <Txt size={11} color={muted} style={{ marginTop: 2 }}>
-                          Speaks: {p.nativeLanguage}, {p.learningLanguage}
-                        </Txt>
-                        <Txt size={11} color={COLORS.primary} style={{ marginTop: 2, fontWeight: '600' }}>
-                          {p.level}  ·  {p.learningLanguage}
-                        </Txt>
+                      <View style={styles.partnerActions}>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          accessibilityLabel={`Chat with ${p.name}`}
+                          onPress={() => {
+                            setSelected(p);
+                            setChatError('');
+                            setScreen('chat');
+                          }}
+                          style={[styles.chatButtonOutline, styles.partnerAction]}
+                        >
+                          <Ionicons name="chatbubble-ellipses-outline" size={17} color={orange} />
+                          <Txt color={orange} size={12} bold>Start chat</Txt>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          accessibilityLabel={`Voice call ${p.name}`}
+                          onPress={() => startCall(p, 'audio')}
+                          disabled={Boolean(callStarting)}
+                          style={styles.partnerAction}
+                        >
+                          {callStarting?.partnerId === p.id && callStarting.type === 'audio' ? (
+                            <ActivityIndicator size="small" color={orange} />
+                          ) : (
+                            <>
+                              <Ionicons name="call-outline" size={17} color={orange} />
+                              <Txt color={orange} size={12} bold>Voice</Txt>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          accessibilityLabel={`Video call ${p.name}`}
+                          onPress={() => startCall(p, 'video')}
+                          disabled={Boolean(callStarting)}
+                          style={styles.partnerAction}
+                        >
+                          {callStarting?.partnerId === p.id && callStarting.type === 'video' ? (
+                            <ActivityIndicator size="small" color={orange} />
+                          ) : (
+                            <>
+                              <Ionicons name="videocam-outline" size={18} color={orange} />
+                              <Txt color={orange} size={12} bold>Video</Txt>
+                            </>
+                          )}
+                        </TouchableOpacity>
                       </View>
-                      <TouchableOpacity
-                        onPress={() => {
-                          setSelected(p);
-                          setScreen('chat');
-                        }}
-                        style={styles.chatButtonOutline}
-                      >
-                        <Txt color={orange} size={12} bold>Start chat</Txt>
-                      </TouchableOpacity>
                     </View>
                   ))}
               </ScrollView>
@@ -1341,12 +1921,33 @@ function App() {
               >
                 <Ionicons name="arrow-back" size={22} color={navy} />
                 <View>
-                  <Txt size={17} bold>{selected.name}  <Txt size={12} color="#18b576">● Online</Txt></Txt>
+                  <Txt size={17} bold>{selected.name}  <Txt size={12} color={selected.online ? '#18b576' : muted}>● {selected.online ? 'Online' : 'Offline'}</Txt></Txt>
                   <Txt size={11} color={muted}>{selected.country} · {selected.learningLanguage}</Txt>
                 </View>
               </TouchableOpacity>
+              {chatError ? (
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel="Return to Discover"
+                  onPress={() => setScreen('discover')}
+                  style={{ padding: 12, backgroundColor: '#FFF1F0' }}
+                >
+                  <Txt color={COLORS.error} size={12}>{chatError}  Return to Discover and reopen this conversation to retry.</Txt>
+                </TouchableOpacity>
+              ) : null}
+              {typing && (
+                <Txt size={11} color={muted} style={{ paddingHorizontal: 18, paddingTop: 8 }}>{selected.name} is typing...</Txt>
+              )}
               <ScrollView contentContainerStyle={{ padding: 16, flexGrow: 1, justifyContent: 'flex-end' }}>
-                {messages
+                {messageLoading && <ActivityIndicator color={orange} style={{ margin: 18 }} />}
+                {!messageLoading && hasOlderMessages && (
+                  <TouchableOpacity onPress={loadEarlierMessages} disabled={loadingOlderMessages} style={{ alignSelf: 'center', padding: 10 }}>
+                    {loadingOlderMessages
+                      ? <ActivityIndicator color={orange} />
+                      : <Txt size={12} color={orange} bold>Load earlier messages</Txt>}
+                  </TouchableOpacity>
+                )}
+                {!messageLoading && messages
                   .filter((m) => (m.from === selected.id && m.to === userId) || (m.from === userId && m.to === selected.id))
                   .map((m) => (
                     <View
@@ -1362,9 +1963,11 @@ function App() {
                         borderRadius: 16,
                       }}
                     >
+                      <Txt color={muted} size={10} style={{ marginBottom: 4 }}>{m.from === userId ? 'You' : selected.name}</Txt>
                       <Txt color={navy} size={14}>{m.text}</Txt>
                       <Txt color={muted} size={10} style={{ marginTop: 5, alignSelf: 'flex-end' }}>
                         {new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {m.from === userId ? ` · ${m.readAt ? 'Read' : m.deliveredAt ? 'Delivered' : 'Sent'}` : ''}
                       </Txt>
                     </View>
                   ))}
@@ -1374,7 +1977,7 @@ function App() {
                   placeholder="Type a message..."
                   placeholderTextColor="#9CA3AF"
                   value={draft}
-                  onChangeText={setDraft}
+                  onChangeText={updateDraft}
                   style={styles.chatInput}
                 />
                 <TouchableOpacity onPress={send} style={styles.sendButton}>
@@ -1382,6 +1985,170 @@ function App() {
                 </TouchableOpacity>
               </View>
             </>
+          )}
+
+          {screen === 'call' && call && (
+            <View style={styles.callScreen}>
+              <View style={styles.callHeader}>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel="End call and return"
+                  onPress={endCall}
+                  style={styles.callBackButton}
+                >
+                  <Ionicons name="chevron-down" size={22} color="#FFFFFF" />
+                </TouchableOpacity>
+                <View style={{ flex: 1 }}>
+                  <Txt color="#FFFFFF" size={17} bold>{call.peer.name}</Txt>
+                  <Txt color="#D8D8E2" size={12}>{call.type === 'video' ? 'Video call' : 'Voice call'}</Txt>
+                </View>
+                <Txt color="#D8D8E2" size={12}>
+                  {call.status === 'Connected'
+                    ? `${String(Math.floor(callDuration / 60)).padStart(2, '0')}:${String(callDuration % 60).padStart(2, '0')}`
+                    : call.status}
+                </Txt>
+              </View>
+
+              {call.type === 'video' ? (
+                <View style={styles.callVideoStage}>
+                  <CallVideo
+                    stream={remoteStream}
+                    label={call.status === 'Connected' ? 'Waiting for remote video…' : 'Connecting video…'}
+                    style={styles.remoteVideo}
+                  />
+                  {localStream?.getVideoTracks().length > 0 ? (
+                    <CallVideo
+                      stream={localStream}
+                      label="Camera off"
+                      mirror
+                      style={styles.localVideo}
+                    />
+                  ) : (
+                    <View style={styles.localVideoFallback}>
+                      <Txt color="#FFFFFF" size={10}>Camera unavailable</Txt>
+                    </View>
+                  )}
+                  {call.status === 'Connected' && remoteStream && !remoteStream.getVideoTracks().length ? (
+                    <View style={styles.videoFallbackNotice}>
+                      <Txt color="#FFFFFF" size={12}>The other person has no camera available. Audio is still connected.</Txt>
+                    </View>
+                  ) : null}
+                </View>
+              ) : (
+                <View style={styles.voiceCallAvatarArea}>
+                  <View style={styles.callAvatar}>
+                    <Txt size={48} bold color="#FFFFFF">{call.peer.name?.charAt(0)?.toUpperCase() || '?'}</Txt>
+                  </View>
+                  <Txt color="#FFFFFF" size={22} bold style={{ marginTop: 16 }}>{call.peer.name}</Txt>
+                </View>
+              )}
+
+              <View style={styles.callStatusArea}>
+                <Txt color="#FFFFFF" size={15} bold>{call.status}</Txt>
+                {callNotice ? <Txt color="#FFD4C8" size={12} style={{ textAlign: 'center', marginTop: 8 }}>{callNotice}</Txt> : null}
+              </View>
+
+              {call.direction === 'incoming' && call.status === 'Ringing' ? (
+                <View style={styles.incomingCallActions}>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel="Decline incoming call"
+                    onPress={rejectCall}
+                    style={[styles.callControl, styles.declineControl]}
+                  >
+                    <Ionicons name="call" size={23} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
+                    <Txt color="#FFFFFF" size={11}>Decline</Txt>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel="Accept incoming call"
+                    onPress={acceptCall}
+                    style={[styles.callControl, styles.acceptControl]}
+                  >
+                    <Ionicons name={call.type === 'video' ? 'videocam' : 'call'} size={23} color="#FFFFFF" />
+                    <Txt color="#FFFFFF" size={11}>Accept</Txt>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.callControls}>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel={muted ? 'Unmute microphone' : 'Mute microphone'}
+                    onPress={() => {
+                      const nextMuted = !muted;
+                      localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !nextMuted; });
+                      setMuted(nextMuted);
+                    }}
+                    style={[styles.callControl, muted && styles.callControlActive]}
+                  >
+                    <Ionicons name={muted ? 'mic-off' : 'mic'} size={21} color="#FFFFFF" />
+                    <Txt color="#FFFFFF" size={10}>{muted ? 'Unmute' : 'Mute'}</Txt>
+                  </TouchableOpacity>
+                  {Platform.OS !== 'web' && (
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      accessibilityLabel={speakerEnabled ? 'Use earpiece' : 'Use speaker'}
+                      onPress={() => {
+                        try {
+                          const nextSpeaker = !speakerEnabled;
+                          setAudioRoute(nextSpeaker);
+                          setSpeakerEnabled(nextSpeaker);
+                        } catch (error) {
+                          setCallNotice(error.message || 'Speaker control is unavailable.');
+                        }
+                      }}
+                      style={[styles.callControl, speakerEnabled && styles.callControlActive]}
+                    >
+                      <Ionicons name={speakerEnabled ? 'volume-high' : 'volume-medium'} size={21} color="#FFFFFF" />
+                      <Txt color="#FFFFFF" size={10}>{speakerEnabled ? 'Speaker' : 'Earpiece'}</Txt>
+                    </TouchableOpacity>
+                  )}
+                  {call.type === 'video' && (
+                    <>
+                      <TouchableOpacity
+                        accessibilityRole="button"
+                        accessibilityLabel={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}
+                        onPress={() => {
+                          const nextEnabled = !cameraEnabled;
+                          localStreamRef.current?.getVideoTracks().forEach((track) => { track.enabled = nextEnabled; });
+                          setCameraEnabled(nextEnabled);
+                        }}
+                        disabled={!localStream?.getVideoTracks().length}
+                        style={[styles.callControl, !cameraEnabled && styles.callControlActive, !localStream?.getVideoTracks().length && { opacity: 0.45 }]}
+                      >
+                        <Ionicons name={cameraEnabled ? 'videocam' : 'videocam-off'} size={21} color="#FFFFFF" />
+                        <Txt color="#FFFFFF" size={10}>{cameraEnabled ? 'Camera' : 'Camera off'}</Txt>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        accessibilityRole="button"
+                        accessibilityLabel="Switch camera"
+                        onPress={() => {
+                          try {
+                            switchCamera(localStreamRef.current, peerRef.current?.connection);
+                          } catch (error) {
+                            setCallNotice(error.message || 'Could not switch camera.');
+                          }
+                        }}
+                        disabled={!localStream?.getVideoTracks().length}
+                        style={[styles.callControl, !localStream?.getVideoTracks().length && { opacity: 0.45 }]}
+                      >
+                        <Ionicons name="camera-reverse-outline" size={21} color="#FFFFFF" />
+                        <Txt color="#FFFFFF" size={10}>Flip</Txt>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel="End call"
+                    onPress={endCall}
+                    style={[styles.callControl, styles.declineControl]}
+                  >
+                    <Ionicons name="call" size={21} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
+                    <Txt color="#FFFFFF" size={10}>End</Txt>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
           )}
 
           {/* SCREEN 8: LIVE SPEAKING ROOMS */}
@@ -1474,6 +2241,46 @@ function App() {
                   <Txt key={v.id} style={{ paddingVertical: 4 }}>📖 {v.word}</Txt>
                 ))}
               </Section>
+              <Section title="Call history">
+                {callHistoryError ? (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    onPress={() => request('calls').then((history) => {
+                      setCallHistory(history);
+                      setCallHistoryError('');
+                    }).catch((error) => setCallHistoryError(error.message || 'Could not load call history.'))}
+                  >
+                    <Txt color={COLORS.error} size={12}>{callHistoryError}  Tap to retry.</Txt>
+                  </TouchableOpacity>
+                ) : null}
+                {callHistory.length === 0 ? (
+                  <Txt size={12} color={muted}>Your incoming, outgoing, missed, and ended calls will appear here.</Txt>
+                ) : callHistory.map((item) => {
+                  const outgoing = item.callerId === userId;
+                  const otherUserId = outgoing ? item.calleeId : item.callerId;
+                  const otherUser = partners.find((partner) => partner.id === otherUserId);
+                  const callStatus = item.status ? item.status.charAt(0).toUpperCase() + item.status.slice(1) : 'Ended';
+                  return (
+                    <View key={item.id} style={styles.callHistoryRow}>
+                      <Ionicons
+                        name={item.status === 'missed' ? 'call-outline' : outgoing ? 'arrow-up-outline' : 'arrow-down-outline'}
+                        size={19}
+                        color={item.status === 'missed' ? COLORS.error : orange}
+                      />
+                      <View style={{ flex: 1, marginLeft: 10 }}>
+                        <Txt size={13} bold>{otherUser?.name || 'BYTALK user'}</Txt>
+                        <Txt size={11} color={muted}>
+                          {outgoing ? 'Outgoing' : 'Incoming'} {item.type === 'video' ? 'video' : 'voice'} · {callStatus}
+                          {item.durationSeconds > 0 ? ` · ${Math.floor(item.durationSeconds / 60)}:${String(item.durationSeconds % 60).padStart(2, '0')}` : ''}
+                        </Txt>
+                      </View>
+                      <Txt size={10} color={muted}>
+                        {item.createdAt ? new Date(item.createdAt).toLocaleDateString() : ''}
+                      </Txt>
+                    </View>
+                  );
+                })}
+              </Section>
               <Btn label="Update my level" outline onPress={() => setScreen('level')} style={{ marginBottom: 12 }} />
               <Btn label="Log Out / Sign Out" outline onPress={handleLogout} style={{ marginBottom: 12 }} />
               <Btn label="Back to Welcome Screen" outline onPress={() => setScreen('welcome')} />
@@ -1481,7 +2288,7 @@ function App() {
           )}
 
           {/* BOTTOM TAB BAR (ONLY ON MAIN LOGGED-IN SCREENS) */}
-          {!['welcome', 'login', 'register', 'onboard', 'level'].includes(screen) && (
+          {!['welcome', 'login', 'register', 'onboard', 'level', 'call'].includes(screen) && (
             <View style={styles.tabBar}>
               {tabItems.map(([id, icon, label]) => (
                 <TouchableOpacity key={id} onPress={() => setScreen(id)} style={styles.tabItem}>
@@ -1560,15 +2367,15 @@ const styles = StyleSheet.create({
   welcomeScrollContainer: {
     flexGrow: 1,
     justifyContent: 'space-between',
-    paddingHorizontal: 24,
-    paddingTop: 18,
-    paddingBottom: 28,
-    backgroundColor: '#FFFFFF',
+    paddingHorizontal: 22,
+    paddingTop: Platform.OS === 'web' ? 18 : 12,
+    paddingBottom: Platform.OS === 'web' ? 22 : 16,
+    backgroundColor: COLORS.lightBg,
   },
   welcomeHeader: {
     alignItems: 'center',
-    marginTop: 8,
-    marginBottom: 10,
+    marginTop: 4,
+    marginBottom: 8,
   },
   brandRow: {
     flexDirection: 'row',
@@ -1587,48 +2394,55 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
   },
   brandSubtitle: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
     color: COLORS.textSecondary,
     marginTop: 3,
-    letterSpacing: 0.8,
+    letterSpacing: 0.5,
   },
   heroTextSection: {
     alignItems: 'center',
-    marginVertical: 10,
+    marginTop: 10,
+    marginBottom: 6,
+    paddingHorizontal: 4,
   },
   heroMainTitle: {
-    fontSize: 32,
+    fontSize: Math.min(31, Math.max(25, windowWidth * 0.075)),
     fontWeight: '800',
     color: COLORS.textPrimary,
     textAlign: 'center',
-    lineHeight: 38,
+    lineHeight: Math.min(38, Math.max(31, windowWidth * 0.09)),
     letterSpacing: -0.5,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   heroSubText: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '400',
     color: COLORS.textSecondary,
     textAlign: 'center',
-    lineHeight: 22,
-    paddingHorizontal: 16,
+    lineHeight: 20,
+    paddingHorizontal: 4,
   },
   heroIllustrationContainer: {
+    width: '100%',
+    flexGrow: 1,
+    minHeight: 230,
+    maxHeight: Math.min(420, screenHeight * 0.48),
     alignItems: 'center',
     justifyContent: 'center',
-    marginVertical: 12,
-    minHeight: Math.min(270, screenHeight * 0.38),
+    marginTop: 4,
+    marginBottom: 8,
   },
   heroIllustrationImage: {
     width: '100%',
-    height: Math.min(270, screenHeight * 0.38),
+    height: '100%',
     maxWidth: 380,
+    alignSelf: 'center',
   },
   welcomeFooter: {
     width: '100%',
     alignItems: 'center',
-    paddingTop: 8,
+    paddingTop: 6,
   },
   primaryButtonShadow: {
     width: '100%',
@@ -1674,8 +2488,8 @@ const styles = StyleSheet.create({
   authScrollContainer: {
     flexGrow: 1,
     paddingHorizontal: 24,
-    paddingTop: 12,
-    paddingBottom: 28,
+    paddingTop: 16,
+    paddingBottom: 24,
     backgroundColor: '#FFFFFF',
   },
   authTopNav: {
@@ -1696,7 +2510,12 @@ const styles = StyleSheet.create({
   },
   authBrandHeader: {
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 24,
+  },
+  authBrandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   authLogoIcon: {
     width: 38,
@@ -1708,6 +2527,7 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     color: COLORS.textPrimary,
     letterSpacing: -0.5,
+    lineHeight: 30,
   },
   authBrandSubtitle: {
     fontSize: 11,
@@ -1717,7 +2537,8 @@ const styles = StyleSheet.create({
     letterSpacing: 0.8,
   },
   authHeadingBlock: {
-    marginBottom: 20,
+    marginBottom: 22,
+    alignItems: 'center',
   },
   authHeadingTitle: {
     fontSize: 26,
@@ -1725,12 +2546,14 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
     letterSpacing: -0.5,
     marginBottom: 6,
+    textAlign: 'center',
   },
   authHeadingSubtitle: {
     fontSize: 14,
     fontWeight: '400',
     color: COLORS.textSecondary,
     lineHeight: 20,
+    textAlign: 'center',
   },
   errorAlertContainer: {
     flexDirection: 'row',
@@ -1754,7 +2577,7 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   inputGroup: {
-    marginBottom: 16,
+    marginBottom: 13,
   },
   inputLabel: {
     fontSize: 13,
@@ -1797,6 +2620,11 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.primary,
   },
+  authFooterLinkRow: {
+    marginTop: 'auto',
+    paddingTop: 28,
+    paddingBottom: 4,
+  },
 
   /* Other Screens Styles */
   searchBar: {
@@ -1810,11 +2638,51 @@ const styles = StyleSheet.create({
     borderColor: border,
   },
   partnerCard: {
-    flexDirection: 'row',
-    paddingVertical: 14,
+    paddingVertical: 16,
     borderBottomWidth: 1,
     borderColor: '#F1F3F7',
+  },
+  partnerInfoRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+  },
+  partnerAvatarImage: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+  },
+  discoverMessage: {
+    minHeight: 140,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  discoverRetry: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginTop: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 18,
+    backgroundColor: '#FFF0E8',
+  },
+  partnerActions: {
+    flexDirection: 'row',
+    gap: 7,
+    marginTop: 12,
+  },
+  partnerAction: {
+    flex: 1,
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingHorizontal: 5,
+    paddingVertical: 8,
+    borderRadius: 18,
+    backgroundColor: '#FFF7F2',
   },
   avatarCircle: {
     width: 52,
@@ -1830,6 +2698,123 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 8,
     backgroundColor: '#fff',
+  },
+  callScreen: {
+    flex: 1,
+    backgroundColor: '#17172F',
+    paddingBottom: 24,
+  },
+  callHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    gap: 12,
+  },
+  callBackButton: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 19,
+    backgroundColor: '#303047',
+  },
+  callVideoStage: {
+    flex: 1,
+    minHeight: 220,
+    marginHorizontal: 12,
+    borderRadius: 22,
+    overflow: 'hidden',
+    backgroundColor: '#25253C',
+    position: 'relative',
+  },
+  remoteVideo: {
+    width: '100%',
+    height: '100%',
+    minHeight: 220,
+    backgroundColor: '#25253C',
+  },
+  localVideo: {
+    position: 'absolute',
+    width: 108,
+    height: 148,
+    right: 12,
+    top: 12,
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: '#3A3A51',
+  },
+  localVideoFallback: {
+    position: 'absolute',
+    width: 108,
+    height: 60,
+    right: 12,
+    top: 12,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#3A3A51',
+  },
+  videoFallbackNotice: {
+    position: 'absolute',
+    bottom: 12,
+    left: 12,
+    right: 12,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: '#17172FDD',
+  },
+  voiceCallAvatarArea: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 250,
+  },
+  callAvatar: {
+    width: 132,
+    height: 132,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 66,
+    backgroundColor: '#34344D',
+  },
+  callStatusArea: {
+    minHeight: 66,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  callControls: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+  },
+  incomingCallActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 44,
+    paddingVertical: 18,
+  },
+  callControl: {
+    width: 60,
+    minHeight: 62,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    borderRadius: 22,
+    backgroundColor: '#3A3A51',
+  },
+  callControlActive: {
+    backgroundColor: '#63637B',
+  },
+  declineControl: {
+    backgroundColor: '#D92D3B',
+  },
+  acceptControl: {
+    backgroundColor: '#168653',
   },
   chatHeader: {
     padding: 18,
@@ -1882,6 +2867,13 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: border,
   },
+  callHistoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderColor: '#F1F3F7',
+  },
   tabBar: {
     flexDirection: 'row',
     borderTopWidth: 1,
@@ -1896,5 +2888,4 @@ const styles = StyleSheet.create({
   },
 });
 
->>>>>>> Stashed changes
 export default App;

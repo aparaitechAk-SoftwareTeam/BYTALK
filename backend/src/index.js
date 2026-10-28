@@ -6,14 +6,29 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import mongoose from 'mongoose';
+import { User, publicUser } from './models/User.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const dbFile = path.join(root, 'data', 'store.json');
+const dbFile = process.env.BYTALK_DATA_FILE
+  ? path.resolve(process.env.BYTALK_DATA_FILE)
+  : path.join(root, 'data', 'store.json');
 fs.mkdirSync(path.dirname(dbFile), { recursive: true });
 
 // Environment configuration
-const JWT_SECRET = process.env.JWT_SECRET || 'bytalk_production_secure_jwt_secret_key_change_in_prod_15d';
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(48).toString('hex');
+if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error('JWT_SECRET must be configured in production.');
+}
+if (!process.env.JWT_SECRET) {
+  console.warn('JWT_SECRET is unset; sessions will be invalidated when the server restarts.');
+}
 const FIFTEEN_DAYS_SECONDS = 15 * 24 * 60 * 60; // 15 days in seconds
+const TURN_URLS = (process.env.TURN_URLS || '').split(',').map((url) => url.trim()).filter(Boolean);
+const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || '';
+if (TURN_URLS.length && !TURN_SHARED_SECRET) {
+  throw new Error('TURN_SHARED_SECRET is required when TURN_URLS is configured.');
+}
 
 // Optional dynamic import of jsonwebtoken and bcryptjs if installed in node_modules
 let jwtLib = null;
@@ -108,8 +123,15 @@ function verifyToken(token) {
 
 function sanitizeUser(user) {
   if (!user) return null;
-  const { passwordHash, ...safe } = user;
+  const { passwordHash, email, _id, ...safe } = user;
+  if (_id && !safe.id) safe.id = String(_id);
   return safe;
+}
+
+function cacheUser(user) {
+  if (!user) return null;
+  const { passwordHash, ...safe } = user;
+  return { ...safe, id: String(user._id || user.id) };
 }
 
 const seed = {
@@ -197,7 +219,6 @@ const seed = {
   vocabulary: [{ id: 'v1', userId: 'u1', word: 'conversation', category: 'Conversation' }],
   reports: [],
 };
-
 let store;
 try {
   store = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
@@ -224,7 +245,47 @@ try {
   fs.writeFileSync(dbFile, JSON.stringify(store, null, 2));
 }
 
+if (!Array.isArray(store.messages)) store.messages = [];
+if (!Array.isArray(store.calls)) store.calls = [];
+
 const save = () => fs.writeFileSync(dbFile, JSON.stringify(store, null, 2));
+
+const mongoUri = process.env.MONGODB_URI;
+if (!mongoUri) {
+  throw new Error('MONGODB_URI must be configured in backend/.env.');
+}
+
+try {
+  await mongoose.connect(mongoUri);
+  console.log('MongoDB Atlas connected successfully.');
+
+  const existingUsers = await User.countDocuments();
+  if (existingUsers === 0 && Array.isArray(store.users)) {
+    const legacyUsers = store.users
+      .filter((user) => user.passwordHash?.startsWith('$2'))
+      .map((user) => ({
+        name: user.name,
+        email: user.email,
+        passwordHash: user.passwordHash,
+        country: user.country,
+        nativeLanguage: user.nativeLanguage,
+        learningLanguage: user.learningLanguage,
+        level: user.level,
+        streak: user.streak,
+        minutes: user.minutes,
+        words: user.words,
+      }));
+    if (legacyUsers.length) {
+      await User.insertMany(legacyUsers, { ordered: false });
+      console.log(`Migrated ${legacyUsers.length} bcrypt user(s) from the local store.`);
+    }
+  }
+  store.users = (await User.find().lean()).map(cacheUser);
+} catch (error) {
+  console.error(`MongoDB connection failed: ${error.message}`);
+  process.exitCode = 1;
+  throw error;
+}
 
 const app = express();
 app.use(
@@ -253,13 +314,73 @@ app.use((req, res, next) => {
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: '*' } });
+const userSockets = new Map();
+const activeCalls = new Map();
+const userCalls = new Map();
+const callTimers = new Map();
+
+function emitToUser(userId, event, payload) {
+  io.to(`user:${userId}`).emit(event, payload);
+}
+
+function requireAuth(req, res, next) {
+  const user = store.users.find((item) => item.id === req.user?.userId);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  req.authenticatedUser = user;
+  next();
+}
+
+function participantForCall(call, userId) {
+  if (call.callerId === userId) return call.calleeId;
+  if (call.calleeId === userId) return call.callerId;
+  return null;
+}
+
+function saveCall(call) {
+  const record = store.calls.find((item) => item.id === call.id);
+  if (record) Object.assign(record, call);
+  else store.calls.push(call);
+  save();
+}
+
+function finishCall(call, status, endedBy) {
+  const timer = callTimers.get(call.id);
+  if (timer) clearTimeout(timer);
+  callTimers.delete(call.id);
+  const disconnectTimer = callTimers.get(`disconnect:${call.id}`);
+  if (disconnectTimer) clearTimeout(disconnectTimer);
+  callTimers.delete(`disconnect:${call.id}`);
+  call.status = status;
+  call.endedAt = new Date().toISOString();
+  call.endedBy = endedBy || null;
+  if (call.connectedAt) {
+    call.durationSeconds = Math.max(0, Math.floor((Date.parse(call.endedAt) - Date.parse(call.connectedAt)) / 1000));
+  } else {
+    call.durationSeconds = 0;
+  }
+  saveCall(call);
+  activeCalls.delete(call.id);
+  userCalls.delete(call.callerId);
+  userCalls.delete(call.calleeId);
+}
+
+function armCallTimeout(call, status, durationMs, onTimeout) {
+  const existing = callTimers.get(call.id);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    if (activeCalls.get(call.id) !== call || call.status !== status) return;
+    onTimeout();
+  }, durationMs);
+  timer.unref?.();
+  callTimers.set(call.id, timer);
+}
 
 // Health check endpoints
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'BYTALK API', time: new Date().toISOString() }));
 app.get('/health', (req, res) => res.json({ ok: true, service: 'BYTALK API', time: new Date().toISOString() }));
 
 // AUTHENTICATION: REGISTER
-app.post('/api/register', (req, res) => {
+app.post('/api/register', async (req, res) => {
   const { name, email, password } = req.body;
   if (!name || typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Full name is required' });
@@ -276,38 +397,44 @@ app.post('/api/register', (req, res) => {
     return res.status(400).json({ error: 'Password must be at least 8 characters long' });
   }
 
-  // Check if email already registered
-  const existing = store.users.find((u) => u.email && u.email.toLowerCase() === cleanEmail);
-  if (existing) {
-    return res.status(409).json({ error: 'An account with this email already exists' });
+  try {
+    // Check if email already registered
+    const existing = await User.exists({ email: cleanEmail });
+    if (existing) {
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
+
+    const newUser = await User.create({
+      name: name.trim().slice(0, 80),
+      email: cleanEmail,
+      passwordHash: hashPassword(password),
+      country: '',
+      nativeLanguage: '',
+      learningLanguage: 'English',
+      level: 'Beginner',
+      online: true,
+      streak: 1,
+      minutes: 0,
+      words: 0,
+      createdAt: new Date().toISOString(),
+    });
+    const cachedUser = cacheUser(newUser.toObject());
+    store.users.push(cachedUser);
+
+    // Issue 15-day JWT token
+    const token = signToken({ userId: cachedUser.id, email: newUser.email }, { expiresIn: '15d' });
+    return res.status(201).json({ ok: true, user: { ...publicUser(newUser), email: newUser.email }, token });
+  } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
+    console.error(`Registration database error: ${error.message}`);
+    return res.status(503).json({ error: 'Registration service is temporarily unavailable.' });
   }
-
-  const newUser = {
-    id: `u_${crypto.randomUUID().slice(0, 8)}`,
-    name: name.trim().slice(0, 80),
-    email: cleanEmail,
-    passwordHash: hashPassword(password),
-    country: '',
-    nativeLanguage: '',
-    learningLanguage: 'English',
-    level: 'Beginner',
-    online: true,
-    streak: 1,
-    minutes: 0,
-    words: 0,
-    createdAt: new Date().toISOString(),
-  };
-
-  store.users.push(newUser);
-  save();
-
-  // Issue 15-day JWT token
-  const token = signToken({ userId: newUser.id, email: newUser.email }, { expiresIn: '15d' });
-  res.status(201).json({ ok: true, user: sanitizeUser(newUser), token });
 });
 
 // AUTHENTICATION: LOGIN
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   if (!email || typeof email !== 'string' || !email.trim()) {
     return res.status(400).json({ error: 'Email address is required' });
@@ -316,22 +443,28 @@ app.post('/api/login', (req, res) => {
     return res.status(400).json({ error: 'Password is required' });
   }
 
-  const cleanEmail = email.trim().toLowerCase();
-  const user = store.users.find((u) => u.email && u.email.toLowerCase() === cleanEmail);
-  if (!user || !verifyPassword(password, user.passwordHash)) {
-    return res.status(401).json({ error: 'Invalid email or password' });
+  try {
+    const cleanEmail = email.trim().toLowerCase();
+    const userDocument = await User.findOne({ email: cleanEmail }).select('+passwordHash');
+    if (!userDocument || !verifyPassword(password, userDocument.passwordHash)) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const user = cacheUser(userDocument.toObject());
+    user.online = true;
+    store.users = store.users.map((item) => item.id === user.id ? user : item);
+
+    // Issue 15-day JWT token
+    const token = signToken({ userId: user.id, email: user.email }, { expiresIn: '15d' });
+    return res.json({ ok: true, user: { ...publicUser(userDocument), email: user.email }, token });
+  } catch (error) {
+    console.error(`Login database error: ${error.message}`);
+    return res.status(503).json({ error: 'Authentication service is temporarily unavailable.' });
   }
-
-  user.online = true;
-  save();
-
-  // Issue 15-day JWT token
-  const token = signToken({ userId: user.id, email: user.email }, { expiresIn: '15d' });
-  res.json({ ok: true, user: sanitizeUser(user), token });
 });
 
 // AUTHENTICATION: VALIDATE SESSION / GET CURRENT USER
-app.get('/api/auth/me', (req, res) => {
+app.get('/api/auth/me', async (req, res) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Authorization token required' });
@@ -339,41 +472,69 @@ app.get('/api/auth/me', (req, res) => {
   const token = authHeader.slice(7).trim();
   try {
     const decoded = verifyToken(token);
-    const user = store.users.find((u) => u.id === decoded.userId);
+    const user = await User.findById(decoded.userId);
     if (!user) {
       return res.status(401).json({ error: 'User session not found or account removed' });
     }
-    return res.json({ ok: true, user: sanitizeUser(user) });
+    return res.json({ ok: true, user: { ...publicUser(user), email: user.email } });
   } catch (err) {
     return res.status(401).json({ error: err.message || 'Invalid or expired session token' });
   }
 });
 
 // USERS & PARTNERS
-app.get('/api/users', (req, res) => res.json(store.users.map(sanitizeUser)));
-
-app.get('/api/partners', (req, res) => {
-  const currentUserId = req.user?.userId || 'u1';
-  const q = String(req.query.q || '').toLowerCase();
-  res.json(
-    store.users
-      .filter((u) => u.id !== currentUserId && [u.name, u.country, u.nativeLanguage, u.level].some((x) => String(x || '').toLowerCase().includes(q)))
-      .map(sanitizeUser)
-  );
+app.get('/api/users', requireAuth, async (req, res) => {
+  const users = await User.find({ _id: { $ne: req.authenticatedUser._id } }).lean();
+  store.users = (await User.find().lean()).map(cacheUser);
+  res.json(users.map(publicUser));
 });
 
-app.post('/api/onboard', (req, res) => {
+async function listDiscoverUsers(req, res) {
+  const currentUserId = req.authenticatedUser.id;
+  const q = String(req.query.q || '').toLowerCase();
+  const mongoUsers = await User.find({ _id: { $ne: currentUserId } }).lean();
+  store.users = (await User.find().lean()).map(cacheUser);
+  const users = mongoUsers
+    .map((user) => {
+      const avatarUrl = user.profilePhotoUrl || null;
+      return {
+        id: String(user._id),
+        name: user.name,
+        displayName: user.displayName || user.name,
+        avatarUrl: typeof avatarUrl === 'string' ? avatarUrl : null,
+        country: user.country || '',
+        nativeLanguage: user.nativeLanguage || '',
+        learningLanguage: user.learningLanguage || '',
+        languages: [user.nativeLanguage, user.learningLanguage].filter(Boolean),
+        level: user.level || '',
+        online: (userSockets.get(user.id)?.size || 0) > 0,
+      };
+    })
+    .filter((user) =>
+      [user.displayName, user.country, ...user.languages, user.level]
+        .some((value) => String(value || '').toLowerCase().includes(q))
+    );
+  res.json(users);
+}
+
+app.get('/api/users/discover', requireAuth, listDiscoverUsers);
+app.get('/api/partners', requireAuth, listDiscoverUsers);
+
+app.post('/api/onboard', requireAuth, async (req, res) => {
   const { name, country, nativeLanguage, learningLanguage, level } = req.body;
-  const currentUserId = req.user?.userId || 'u1';
-  let me = store.users.find((u) => u.id === currentUserId) || store.users.find((u) => u.id === 'u1');
-  if (me) {
-    for (const [k, v] of Object.entries({ name, country, nativeLanguage, learningLanguage, level })) {
-      if (typeof v === 'string' && v.trim()) me[k] = v.trim().slice(0, 80);
-    }
-    save();
-    return res.json(sanitizeUser(me));
+  const me = req.authenticatedUser;
+  for (const [k, v] of Object.entries({ name, country, nativeLanguage, learningLanguage, level })) {
+    if (typeof v === 'string' && v.trim()) me[k] = v.trim().slice(0, 80);
   }
-  res.status(404).json({ error: 'User not found' });
+  const updated = await User.findByIdAndUpdate(me.id, {
+    name: me.name,
+    country: me.country,
+    nativeLanguage: me.nativeLanguage,
+    learningLanguage: me.learningLanguage,
+    level: me.level,
+  }, { new: true });
+  store.users = store.users.map((user) => user.id === me.id ? cacheUser({ ...updated.toObject(), passwordHash: me.passwordHash }) : user);
+  res.json({ ...publicUser(updated), email: updated.email });
 });
 
 app.get('/api/rooms', (req, res) => res.json(store.rooms));
@@ -387,23 +548,76 @@ app.post('/api/rooms/:id/join', (req, res) => {
   res.json(room);
 });
 
-app.get('/api/messages/:a/:b', (req, res) =>
-  res.json(store.messages.filter((m) => (m.from === req.params.a && m.to === req.params.b) || (m.from === req.params.b && m.to === req.params.a)))
-);
+app.get('/api/messages/:a/:b', requireAuth, (req, res) => {
+  const { a, b } = req.params;
+  const currentUserId = req.authenticatedUser.id;
+  if (![a, b].includes(currentUserId) || a === b || !store.users.some((user) => user.id === (a === currentUserId ? b : a))) {
+    return res.status(403).json({ error: 'You are not a participant in this conversation' });
+  }
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 100));
+  const before = req.query.before ? Date.parse(String(req.query.before)) : Infinity;
+  if (!Number.isFinite(before) && before !== Infinity) {
+    return res.status(400).json({ error: 'Invalid message cursor' });
+  }
+  const conversation = store.messages
+    .filter((message) =>
+      ((message.from === a && message.to === b) || (message.from === b && message.to === a))
+      && Date.parse(message.at) < before
+    )
+    .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+  const messages = conversation.slice(-limit);
+  let changed = false;
+  for (const message of messages) {
+    if (message.to === currentUserId && !message.readAt) {
+      message.readAt = new Date().toISOString();
+      emitToUser(message.from, 'message:status', { id: message.id, deliveredAt: message.deliveredAt, readAt: message.readAt });
+      changed = true;
+    }
+  }
+  if (changed) save();
+  res.json(messages);
+});
 
-app.post('/api/messages', (req, res) => {
-  const { from, to, text } = req.body;
-  const senderId = req.user?.userId || from;
-  if (!store.users.some((u) => u.id === senderId) || !store.users.some((u) => u.id === to) || typeof text !== 'string' || !text.trim() || text.length > 1500) {
+app.post('/api/messages', requireAuth, (req, res) => {
+  const { to, text } = req.body;
+  const senderId = req.authenticatedUser.id;
+  if (typeof to !== 'string' || to === senderId || !store.users.some((user) => user.id === to) || typeof text !== 'string' || !text.trim() || text.length > 1500) {
     return res.status(400).json({ error: 'Invalid message' });
   }
-  const msg = { id: crypto.randomUUID(), from: senderId, to, text: text.trim(), at: new Date().toISOString() };
+  const deliveredAt = (userSockets.get(to)?.size || 0) > 0 ? new Date().toISOString() : null;
+  const msg = { id: crypto.randomUUID(), from: senderId, to, text: text.trim(), at: new Date().toISOString(), deliveredAt, readAt: null };
   store.messages.push(msg);
   save();
-  io.emit('message:new', msg);
+  emitToUser(senderId, 'message:new', msg);
+  emitToUser(to, 'message:new', msg);
   res.status(201).json(msg);
 });
 
+app.get('/api/calls', requireAuth, (req, res) => {
+  const currentUserId = req.authenticatedUser.id;
+  res.json(
+    store.calls
+      .filter((call) => call.callerId === currentUserId || call.calleeId === currentUserId)
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+      .slice(0, 100)
+  );
+});
+
+app.get('/api/rtc-config', requireAuth, (req, res) => {
+  const iceServers = (process.env.RTC_STUN_URLS || 'stun:stun.l.google.com:19302')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .map((urls) => ({ urls }));
+  if (TURN_URLS.length) {
+    const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
+    const username = `${expiresAt}:${req.authenticatedUser.id}`;
+    const credential = crypto.createHmac('sha1', TURN_SHARED_SECRET).update(username).digest('base64');
+    iceServers.push({ urls: TURN_URLS, username, credential });
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json({ iceServers });
+});
 app.get('/api/vocabulary/:userId', (req, res) => {
   const currentUserId = req.user?.userId || req.params.userId;
   res.json(store.vocabulary.filter((v) => v.userId === currentUserId || v.userId === req.params.userId));
@@ -457,8 +671,213 @@ app.patch('/api/reports/:id', (req, res) => {
   res.json(report);
 });
 
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+    const decoded = verifyToken(token);
+    const user = store.users.find((item) => item.id === decoded.userId);
+    if (!user) throw new Error('Account not found');
+    socket.data.userId = user.id;
+    next();
+  } catch {
+    next(new Error('Authentication required'));
+  }
+});
+
 io.on('connection', (socket) => {
+  const userId = socket.data.userId;
+  console.log(`Socket connected for user ${userId}.`);
+  const sockets = userSockets.get(userId) || new Set();
+  const wasOnline = sockets.size > 0;
+  sockets.add(socket.id);
+  userSockets.set(userId, sockets);
+  socket.join(`user:${userId}`);
+  if (!wasOnline) io.emit('presence:update', { userId, online: true });
+
+  const ongoingCallId = userCalls.get(userId);
+  if (ongoingCallId) {
+    const call = activeCalls.get(ongoingCallId);
+    if (call) {
+      emitToUser(call.callerId, 'call:state', { callId: call.id, status: 'reconnecting' });
+      emitToUser(call.calleeId, 'call:state', { callId: call.id, status: 'reconnecting' });
+    }
+  }
+
   socket.on('ping:app', () => socket.emit('pong:app'));
+
+  socket.on('typing:start', ({ to } = {}) => {
+    if (typeof to === 'string' && to !== userId && store.users.some((user) => user.id === to)) {
+      emitToUser(to, 'typing:update', { from: userId, typing: true });
+    }
+  });
+
+  socket.on('typing:stop', ({ to } = {}) => {
+    if (typeof to === 'string' && to !== userId) {
+      emitToUser(to, 'typing:update', { from: userId, typing: false });
+    }
+  });
+
+  socket.on('call:invite', ({ to, type } = {}, acknowledge = () => {}) => {
+    console.log(`Call invite received from ${userId} to ${to} (${type}).`);
+    if (typeof acknowledge !== 'function') return;
+    if (typeof to !== 'string' || to === userId || !['audio', 'video'].includes(type)) {
+      acknowledge({ error: 'Invalid call request' });
+      return;
+    }
+    if (!store.users.some((user) => user.id === to)) {
+      acknowledge({ error: 'User not found' });
+      return;
+    }
+    if (!(userSockets.get(to)?.size || 0)) {
+      console.log(`Call invite rejected: recipient ${to} is offline.`);
+      acknowledge({ error: 'This person is offline' });
+      return;
+    }
+    if (userCalls.has(userId) || userCalls.has(to)) {
+      acknowledge({ error: 'One of you is already on another call' });
+      return;
+    }
+
+    const createdAt = new Date().toISOString();
+    const call = {
+      id: crypto.randomUUID(),
+      callerId: userId,
+      calleeId: to,
+      type,
+      status: 'ringing',
+      createdAt,
+    };
+    activeCalls.set(call.id, call);
+    userCalls.set(userId, call.id);
+    userCalls.set(to, call.id);
+    saveCall(call);
+
+    const caller = store.users.find((user) => user.id === userId);
+    emitToUser(to, 'call:incoming', {
+      callId: call.id,
+      type,
+      createdAt,
+      caller: sanitizeUser(caller),
+    });
+    console.log(`Call ${call.id} is ringing for ${to}.`);
+    acknowledge({ callId: call.id, status: 'ringing' });
+    armCallTimeout(call, 'ringing', 35000, () => {
+      finishCall(call, 'missed', null);
+      emitToUser(call.callerId, 'call:missed', { callId: call.id, status: 'missed' });
+      emitToUser(call.calleeId, 'call:ended', { callId: call.id, status: 'missed' });
+    });
+  });
+
+  socket.on('call:accept', ({ callId } = {}, acknowledge = () => {}) => {
+    console.log(`Call accept received from ${userId} for ${callId}.`);
+    const call = activeCalls.get(callId);
+    if (!call || call.calleeId !== userId || call.status !== 'ringing') {
+      acknowledge({ error: 'This call is no longer available' });
+      return;
+    }
+    const timer = callTimers.get(call.id);
+    if (timer) clearTimeout(timer);
+    callTimers.delete(call.id);
+    call.status = 'connecting';
+    call.acceptedAt = new Date().toISOString();
+    saveCall(call);
+    emitToUser(call.callerId, 'call:accepted', { callId: call.id, status: 'connecting' });
+    acknowledge({ ok: true });
+    armCallTimeout(call, 'connecting', 45000, () => {
+      finishCall(call, 'failed', null);
+      emitToUser(call.callerId, 'call:ended', { callId: call.id, status: 'failed', reason: 'connection-timeout' });
+      emitToUser(call.calleeId, 'call:ended', { callId: call.id, status: 'failed', reason: 'connection-timeout' });
+    });
+  });
+
+  socket.on('call:reject', ({ callId } = {}, acknowledge = () => {}) => {
+    console.log(`Call reject received from ${userId} for ${callId}.`);
+    const call = activeCalls.get(callId);
+    if (!call || call.calleeId !== userId || call.status !== 'ringing') {
+      acknowledge({ error: 'This call is no longer available' });
+      return;
+    }
+    finishCall(call, 'rejected', userId);
+    emitToUser(call.callerId, 'call:rejected', { callId: call.id, status: 'rejected' });
+    emitToUser(call.calleeId, 'call:ended', { callId: call.id, status: 'rejected' });
+    acknowledge({ ok: true });
+  });
+
+  socket.on('call:signal', ({ callId, kind, signal } = {}, acknowledge = () => {}) => {
+    const call = activeCalls.get(callId);
+    const recipientId = call && participantForCall(call, userId);
+    const validKind = ['offer', 'answer', 'ice'].includes(kind);
+    const validRole = (kind !== 'offer' || call?.callerId === userId)
+      && (kind !== 'answer' || call?.calleeId === userId);
+    let payloadSize = Infinity;
+    try {
+      payloadSize = JSON.stringify(signal).length;
+    } catch {}
+    if (!call || call.status === 'ringing' || !recipientId || !validKind || !validRole || !signal || payloadSize > 100000) {
+      acknowledge({ error: 'Invalid or unauthorized call signal' });
+      return;
+    }
+    emitToUser(recipientId, 'call:signal', { callId, kind, signal });
+    acknowledge({ ok: true });
+  });
+
+  socket.on('call:connected', ({ callId } = {}) => {
+    const call = activeCalls.get(callId);
+    if (!call || !participantForCall(call, userId) || call.status === 'ringing') return;
+    for (const participantId of [call.callerId, call.calleeId]) {
+      const reconnectTimer = callTimers.get(`disconnect:${call.id}:${participantId}`);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      callTimers.delete(`disconnect:${call.id}:${participantId}`);
+    }
+    if (!call.connectedAt) {
+      const timer = callTimers.get(call.id);
+      if (timer) clearTimeout(timer);
+      callTimers.delete(call.id);
+      call.connectedAt = new Date().toISOString();
+      call.status = 'connected';
+      saveCall(call);
+    }
+    emitToUser(call.callerId, 'call:state', { callId, status: 'connected', connectedAt: call.connectedAt });
+    emitToUser(call.calleeId, 'call:state', { callId, status: 'connected', connectedAt: call.connectedAt });
+  });
+
+  socket.on('call:end', ({ callId } = {}, acknowledge = () => {}) => {
+    const call = activeCalls.get(callId);
+    if (!call || !participantForCall(call, userId)) {
+      acknowledge({ error: 'This call is no longer available' });
+      return;
+    }
+    finishCall(call, call.status === 'ringing' ? 'cancelled' : 'ended', userId);
+    const ended = { callId, status: call.status, endedBy: userId };
+    emitToUser(call.callerId, 'call:ended', ended);
+    emitToUser(call.calleeId, 'call:ended', ended);
+    acknowledge({ ok: true });
+  });
+
+  socket.on('disconnect', () => {
+    const currentSockets = userSockets.get(userId);
+    currentSockets?.delete(socket.id);
+    if (currentSockets?.size) return;
+    userSockets.delete(userId);
+    io.emit('presence:update', { userId, online: false });
+
+    const callId = userCalls.get(userId);
+    const call = activeCalls.get(callId);
+    if (call) {
+      const otherUserId = participantForCall(call, userId);
+      emitToUser(otherUserId, 'call:state', { callId, status: 'reconnecting' });
+      const timerKey = `disconnect:${call.id}:${userId}`;
+      const timer = setTimeout(() => {
+        if (!activeCalls.has(callId) || (userSockets.get(userId)?.size || 0)) return;
+        finishCall(call, 'ended', userId);
+        const ended = { callId, status: 'ended', reason: 'disconnected' };
+        emitToUser(call.callerId, 'call:ended', ended);
+        emitToUser(call.calleeId, 'call:ended', ended);
+      }, 30000);
+      timer.unref?.();
+      callTimers.set(timerKey, timer);
+    }
+  });
 });
 
 const port = Number(process.env.PORT || 4000);

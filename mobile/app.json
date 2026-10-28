@@ -7,13 +7,29 @@
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "BYTALK uses your microphone for private voice and video calls.",
+        "NSCameraUsageDescription": "BYTALK uses your camera for private video calls."
+      }
     },
     "android": {
-      "package": "com.bytalk.languageapp"
+      "package": "com.bytalk.languageapp",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "plugins": [
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "@config-plugins/react-native-webrtc",
+        {
+          "cameraPermission": "BYTALK uses your camera for private video calls.",
+          "microphonePermission": "BYTALK uses your microphone for private calls."
+        }
+      ]
     ]
   }
 }
