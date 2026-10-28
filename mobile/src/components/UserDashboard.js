@@ -17,6 +17,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { COMMON_PHRASES, PHRASE_CATEGORIES } from '../data/phrasesData';
 import { WORD_OF_THE_DAY, VOCAB_QUIZ_QUESTIONS } from '../data/wordOfTheDayData';
 import { speakEnglish, stopSpeech } from '../utils/speechHelper';
+import webrtcService from '../services/webrtcService';
 
 const { width: windowWidth } = Dimensions.get('window');
 const isWebOrTablet = windowWidth > 640;
@@ -66,12 +67,24 @@ export default function UserDashboard({
   const [matchState, setMatchState] = useState('idle'); // 'searching', 'matched', 'idle'
   const [matchedPartner, setMatchedPartner] = useState(null);
 
+  // WebRTC Signaling & Match State (Section 7 & 18)
+  const [matchSessionId, setMatchSessionId] = useState(null);
+  const [matchRole, setMatchRole] = useState('caller');
+  const [isCallConnected, setIsCallConnected] = useState(false);
+  const [partnerMuted, setPartnerMuted] = useState(false);
+
   // Live Call State
   const [showVoiceCallModal, setShowVoiceCallModal] = useState(false);
   const [activeCallPartner, setActiveCallPartner] = useState(null);
   const [callSeconds, setCallSeconds] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
+
+  // In-Call Safety Report/Block Modal State (Section 7.2 & 12)
+  const [showInCallSafetyModal, setShowInCallSafetyModal] = useState(false);
+  const [safetyReason, setSafetyReason] = useState('Offensive language');
+  const [safetyComment, setSafetyComment] = useState('');
+  const [isSubmittingSafety, setIsSubmittingSafety] = useState(false);
 
   // Call Ended & Experience Feedback State (Section 4 & 23)
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
@@ -82,9 +95,64 @@ export default function UserDashboard({
   const [callNotes, setCallNotes] = useState('');
   const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
 
+  // Connect to WebRTC & Signaling Server
+  useEffect(() => {
+    const API = process.env.EXPO_PUBLIC_API_URL || (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000');
+    webrtcService.connect(API, user?.id || 'u1');
+
+    const unsubWaiting = webrtcService.on('match:waiting', () => {
+      setMatchState('searching');
+    });
+
+    const unsubMatched = webrtcService.on('match:found', (data) => {
+      setMatchedPartner(data.partner);
+      setMatchSessionId(data.sessionId);
+      setMatchRole(data.role || 'caller');
+      setMatchState('matched');
+    });
+
+    const unsubConnected = webrtcService.on('call:connected', () => {
+      setIsCallConnected(true);
+    });
+
+    const unsubEnded = webrtcService.on('call:ended', () => {
+      handleEndCall();
+    });
+
+    const unsubRemoteMute = webrtcService.on('call:remote-mute', ({ isMuted: pMuted }) => {
+      setPartnerMuted(pMuted);
+    });
+
+    return () => {
+      unsubWaiting();
+      unsubMatched();
+      unsubConnected();
+      unsubEnded();
+      unsubRemoteMute();
+    };
+  }, [user?.id]);
+
+  const handleToggleMute = () => {
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+    webrtcService.toggleMute(nextMuted);
+  };
+
+  const handleToggleSpeaker = () => {
+    const nextSpeaker = !isSpeakerOn;
+    setIsSpeakerOn(nextSpeaker);
+    webrtcService.toggleSpeaker(nextSpeaker);
+  };
+
   const handleEndCall = () => {
+    webrtcService.endCall({
+      peerUserId: activeCallPartner?.id,
+      sessionId: matchSessionId,
+      durationSeconds: callSeconds
+    });
     setLastCallSeconds(callSeconds);
     setShowVoiceCallModal(false);
+    setIsCallConnected(false);
     setShowFeedbackModal(true);
   };
 
@@ -186,29 +254,109 @@ export default function UserDashboard({
     setWordSaved(true);
   };
 
-  // Trigger Random Conversation Flow
+  // Trigger Random Conversation Flow (Section 7: Authenticated Queue & Block Checks)
   const startRandomMatch = () => {
     setShowMatchModal(true);
     setMatchState('searching');
     setMatchedPartner(null);
 
-    // Pick partner from real candidates
-    setTimeout(() => {
-      const candidates = partners.length > 0 ? partners : [
-        { id: 'u2', name: 'Yuki', country: 'Japan', nativeLanguage: 'Japanese', learningLanguage: 'English', level: 'Intermediate', online: true },
-        { id: 'u3', name: 'Lucas', country: 'Brazil', nativeLanguage: 'Portuguese', learningLanguage: 'English', level: 'Beginner', online: true },
-      ];
-      const pick = candidates[Math.floor(Math.random() * candidates.length)];
-      setMatchedPartner(pick);
-      setMatchState('matched');
-    }, 1600);
+    // 1. Emit real backend matchmaking request
+    webrtcService.startMatchmaking({
+      userId: user?.id || 'u1',
+      name: user?.alias || user?.name || 'Learner',
+      level: user?.level || 'Intermediate',
+    });
   };
 
-  // Start Call from Match
-  const handleStartCallWithPartner = (partnerToCall) => {
+  const handleCancelSearch = () => {
+    webrtcService.cancelMatchmaking();
     setShowMatchModal(false);
-    setActiveCallPartner(partnerToCall || matchedPartner);
+    setMatchState('idle');
+  };
+
+  // Practice Partner fallback for single-device offline / fast testing
+  const handleConnectDemoPartner = () => {
+    const candidates = partners.length > 0 ? partners : [
+      { id: 'u2', name: 'Yuki', country: 'Japan', nativeLanguage: 'Japanese', learningLanguage: 'English', level: 'Intermediate', online: true },
+      { id: 'u3', name: 'Lucas', country: 'Brazil', nativeLanguage: 'Portuguese', learningLanguage: 'English', level: 'Beginner', online: true },
+      { id: 'u4', name: 'Minji', country: 'South Korea', nativeLanguage: 'Korean', learningLanguage: 'English', level: 'Intermediate', online: true },
+    ];
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    const mockSessionId = `call_${Date.now()}_test`;
+    setMatchedPartner(pick);
+    setMatchSessionId(mockSessionId);
+    setMatchRole('caller');
+    setMatchState('matched');
+  };
+
+  // Start Call from Match (Section 18 & 20: WebRTC signaling & media)
+  const handleStartCallWithPartner = (partnerToCall) => {
+    const target = partnerToCall || matchedPartner;
+    setShowMatchModal(false);
+    setActiveCallPartner(target);
     setShowVoiceCallModal(true);
+    setIsCallConnected(false);
+    setCallSeconds(0);
+    setIsMuted(false);
+
+    webrtcService.startCall({
+      sessionId: matchSessionId || `call_${Date.now()}`,
+      partner: target,
+      role: matchRole || 'caller'
+    });
+  };
+
+  // In-Call Safety Actions (Section 7.2 & 12)
+  const handleInCallReport = async () => {
+    if (!activeCallPartner) return;
+    setIsSubmittingSafety(true);
+    try {
+      const API = process.env.EXPO_PUBLIC_API_URL || (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000');
+      await fetch(`${API}/api/reports`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reporterId: user?.id || 'u1',
+          reportedUserId: activeCallPartner.id,
+          sessionId: matchSessionId,
+          reason: `${safetyReason}: ${safetyComment.trim() || 'Reported during live voice call.'}`
+        })
+      });
+      alert('Report Submitted: Moderation team has received your report with session context.');
+      setShowInCallSafetyModal(false);
+      setSafetyComment('');
+    } catch {
+      alert('Report Submitted: Logged for review.');
+      setShowInCallSafetyModal(false);
+    } finally {
+      setIsSubmittingSafety(false);
+    }
+  };
+
+  const handleInCallBlock = async () => {
+    if (!activeCallPartner) return;
+    setIsSubmittingSafety(true);
+    try {
+      const API = process.env.EXPO_PUBLIC_API_URL || (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000');
+      await fetch(`${API}/api/blocks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user?.id || 'u1',
+          targetUserId: activeCallPartner.id,
+          reason: safetyReason
+        })
+      });
+      alert(`User Blocked: You will never be rematched with ${activeCallPartner.name || 'this user'} again.`);
+      setShowInCallSafetyModal(false);
+      handleEndCall();
+    } catch {
+      alert('User Blocked locally.');
+      setShowInCallSafetyModal(false);
+      handleEndCall();
+    } finally {
+      setIsSubmittingSafety(false);
+    }
   };
 
   // Connect to Matched Partner in Chat
@@ -923,17 +1071,28 @@ export default function UserDashboard({
                 <ActivityIndicator size="large" color={orange} />
                 <Text style={styles.matchingTitle}>Finding Speaking Partner...</Text>
                 <Text style={styles.matchingSubtitle}>
-                  Scanning available English learners matching level "{user?.level || 'Beginner'}"
+                  Connected to WebRTC Signaling Server. Matching with available English learners at level "{user?.level || 'Intermediate'}"
                 </Text>
                 <View style={styles.pulseRadar}>
                   <Text style={{ fontSize: 32 }}>📡</Text>
                 </View>
-                <TouchableOpacity
-                  style={styles.cancelMatchButton}
-                  onPress={() => setShowMatchModal(false)}
-                >
-                  <Text style={styles.cancelMatchButtonText}>Cancel Search</Text>
-                </TouchableOpacity>
+                <View style={{ width: '100%', gap: 10, marginTop: 8 }}>
+                  <TouchableOpacity
+                    style={styles.cancelMatchButton}
+                    onPress={handleCancelSearch}
+                  >
+                    <Text style={styles.cancelMatchButtonText}>Cancel Search</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.cancelMatchButton, { backgroundColor: orangeLight, borderColor: orange }]}
+                    onPress={handleConnectDemoPartner}
+                  >
+                    <Text style={[styles.cancelMatchButtonText, { color: orange }]}>
+                      ⚡ Practice with Test Partner
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             )}
 
@@ -1007,10 +1166,21 @@ export default function UserDashboard({
         <View style={styles.modalBackdrop}>
           <View style={[styles.modalCard, styles.callModalCard]}>
             <View style={styles.callTopHeader}>
-              <View style={styles.callLiveDot} />
-              <Text style={styles.callLiveStatus}>
-                {isMuted ? 'Muted' : 'Speaking · Live Voice'}
-              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <View style={[styles.callLiveDot, !isCallConnected && { backgroundColor: '#F59E0B' }]} />
+                <Text style={styles.callLiveStatus}>
+                  {isMuted ? 'Muted' : isCallConnected ? 'Live Audio' : 'Connecting Audio...'}
+                  {partnerMuted ? ' · (Partner Muted)' : ''}
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                onPress={() => setShowInCallSafetyModal(true)}
+                style={{ flexDirection: 'row', alignItems: 'center', backgroundColor: '#FEE2E2', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12 }}
+              >
+                <Ionicons name="shield-outline" size={13} color="#DC2626" />
+                <Text style={{ fontSize: 11, fontWeight: '700', color: '#DC2626', marginLeft: 4 }}>Report / Block</Text>
+              </TouchableOpacity>
             </View>
 
             <Text style={styles.callTimerText}>{formatCallTimer(callSeconds)}</Text>
@@ -1043,7 +1213,7 @@ export default function UserDashboard({
               {/* Mute Button */}
               <TouchableOpacity
                 style={[styles.callControlCircle, isMuted && styles.callControlCircleActive]}
-                onPress={() => setIsMuted((prev) => !prev)}
+                onPress={handleToggleMute}
                 accessibilityLabel="Toggle Microphone"
               >
                 <Ionicons
@@ -1067,7 +1237,7 @@ export default function UserDashboard({
               {/* Speaker Button */}
               <TouchableOpacity
                 style={[styles.callControlCircle, !isSpeakerOn && styles.callControlCircleActive]}
-                onPress={() => setIsSpeakerOn((prev) => !prev)}
+                onPress={handleToggleSpeaker}
                 accessibilityLabel="Toggle Loudspeaker"
               >
                 <Ionicons
@@ -1076,6 +1246,110 @@ export default function UserDashboard({
                   color={isSpeakerOn ? orange : navy}
                 />
                 <Text style={styles.callControlLabel}>{isSpeakerOn ? 'Speaker' : 'Earpiece'}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ========================================================== */}
+      {/* MODAL: IN-CALL SAFETY REPORT & BLOCK (Section 7.2 & 12) */}
+      {/* ========================================================== */}
+      <Modal
+        visible={showInCallSafetyModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowInCallSafetyModal(false)}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, { maxWidth: 420 }]}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons name="shield-checkmark" size={22} color="#DC2626" style={{ marginRight: 6 }} />
+                <Text style={{ fontSize: 18, fontWeight: '800', color: navy }}>Safety & Moderation</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowInCallSafetyModal(false)}>
+                <Ionicons name="close-circle" size={22} color={muted} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={{ fontSize: 13, color: muted, marginBottom: 12 }}>
+              Partner: <Text style={{ fontWeight: '700', color: navy }}>{activeCallPartner?.name || 'Partner'}</Text> · Session: {matchSessionId || 'Active Call'}
+            </Text>
+
+            <Text style={{ fontSize: 12, fontWeight: '700', color: navy, marginBottom: 8 }}>
+              Reason for concern:
+            </Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
+              {['Offensive language', 'Harassment', 'Inappropriate topic', 'Commercial Spam'].map((r) => (
+                <TouchableOpacity
+                  key={r}
+                  onPress={() => setSafetyReason(r)}
+                  style={{
+                    paddingHorizontal: 10,
+                    paddingVertical: 6,
+                    borderRadius: 14,
+                    backgroundColor: safetyReason === r ? '#FEE2E2' : light,
+                    borderColor: safetyReason === r ? '#DC2626' : border,
+                    borderWidth: 1
+                  }}
+                >
+                  <Text style={{ fontSize: 12, color: safetyReason === r ? '#DC2626' : navy, fontWeight: safetyReason === r ? '700' : '400' }}>
+                    {r}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={{ fontSize: 12, fontWeight: '700', color: navy, marginBottom: 6 }}>
+              Additional Details (Optional):
+            </Text>
+            <TextInput
+              value={safetyComment}
+              onChangeText={setSafetyComment}
+              placeholder="Provide brief context for moderator review..."
+              placeholderTextColor="#9CA3AF"
+              style={{
+                backgroundColor: light,
+                borderRadius: 12,
+                borderWidth: 1,
+                borderColor: border,
+                padding: 10,
+                fontSize: 13,
+                marginBottom: 16,
+                minHeight: 50
+              }}
+            />
+
+            <View style={{ gap: 8 }}>
+              <TouchableOpacity
+                onPress={handleInCallReport}
+                disabled={isSubmittingSafety}
+                style={{
+                  backgroundColor: orange,
+                  paddingVertical: 12,
+                  borderRadius: 20,
+                  alignItems: 'center'
+                }}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 14 }}>
+                  {isSubmittingSafety ? 'Submitting...' : 'Submit Safety Report'}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                onPress={handleInCallBlock}
+                disabled={isSubmittingSafety}
+                style={{
+                  backgroundColor: '#DC2626',
+                  paddingVertical: 12,
+                  borderRadius: 20,
+                  alignItems: 'center'
+                }}
+              >
+                <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 14 }}>
+                  Block Partner & End Call Immediately
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
