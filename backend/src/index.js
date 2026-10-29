@@ -219,6 +219,7 @@ const seed = {
   vocabulary: [{ id: 'v1', userId: 'u1', word: 'conversation', category: 'Conversation' }],
   reports: [],
 };
+
 let store;
 try {
   store = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
