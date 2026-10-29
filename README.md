@@ -71,6 +71,76 @@ TURN_SHARED_SECRET=<same private shared secret configured on the TURN server>
 
 Set the TURN service to use the same shared secret and REST authentication. The backend issues short-lived per-user TURN credentials; the shared secret stays on the server. Without a reachable TURN service, calls may fail on restrictive NATs or firewalls even when direct STUN connectivity works. Use TLS and a real TURN service for deployment.
 
+## Live speaking rooms
+
+Speaking rooms use LiveKit as the SFU/media server. Socket.IO authenticates room membership and broadcasts the participant list; LiveKit carries microphone audio and subscriptions. The room cards show `Unavailable` until all three backend variables are configured.
+
+For local development, install and run LiveKit Server using its official local-development instructions, then configure `backend/.env`:
+
+```dotenv
+LIVEKIT_URL=ws://localhost:7880
+LIVEKIT_API_KEY=<local-livekit-api-key>
+LIVEKIT_API_SECRET=<local-livekit-api-secret>
+```
+
+Do not put the LiveKit API key or secret in `mobile/.env` or in source control. For a hosted LiveKit project, use its secure `wss://` URL and server-side API credentials. The backend creates short-lived room tokens at `GET /api/rooms/:id/session`; the mobile app receives only the short-lived participant token.
+
+The Expo native app requires a development build because LiveKit and the existing WebRTC dependencies contain native code:
+
+```powershell
+Set-Location mobile
+npx expo run:android
+```
+
+For web, run `npx expo start --web` on `localhost` so browser microphone permission is available.
+
+## Subscriptions and premium access
+
+Plans are defined centrally in `backend/src/subscriptions.js`:
+
+- Free: ₹0, 10 voice minutes/month and 1 video-call trial/month.
+- BYTALK Plus: ₹199/month, unlimited video calls and 120 voice minutes/month.
+- BYTALK Pro: ₹399/month, unlimited configured call allowances and Pro feature entitlements.
+
+The backend is authoritative for plan, expiration, renewal status, provider, and entitlement ID. The client never unlocks a plan merely because an upgrade button was pressed. Video-call invitations and acceptance are checked on the backend, and the configured Free video allowance is enforced there.
+
+RevenueCat setup is required for real purchases:
+
+1. Create RevenueCat, Apple App Store, and Google Play Console accounts.
+2. Create matching monthly products and `bytalk_plus` / `bytalk_pro` entitlements in RevenueCat.
+3. Configure `EXPO_PUBLIC_REVENUECAT_API_KEY` in `mobile/.env` for native development builds. This is a public SDK key; never put the RevenueCat secret/webhook authorization in the mobile app.
+4. Configure the backend webhook URL as `https://<backend-host>/api/webhooks/revenuecat` and set the same authorization value in `backend/.env`:
+
+```dotenv
+REVENUECAT_WEBHOOK_AUTH=<random-webhook-authorization-value>
+REVENUECAT_PLUS_ENTITLEMENT=bytalk_plus
+REVENUECAT_PRO_ENTITLEMENT=bytalk_pro
+```
+
+5. Configure RevenueCat to send initial purchase, renewal, cancellation, expiration, billing issue, and product-change events. Webhook event IDs are stored in MongoDB for idempotent processing.
+
+Purchases require a custom Expo development build; Expo Go cannot load the native billing module:
+
+```powershell
+Set-Location mobile
+npx expo install react-native-purchases expo-dev-client
+npx expo run:android
+```
+
+For iOS, use `npx expo run:ios` on macOS with Xcode. Use App Store Sandbox and Google Play license-test accounts. The web build does not use native store billing; its Premium screen explains that purchases must be made in a supported native build. Store products, tax, cancellation, renewal, and legal Terms/Privacy pages must be configured in the relevant stores before release.
+
+## Message retention
+
+Messages are retained for 24 hours. Each MongoDB message has a `createdAt` field and the backend creates the named TTL index `message_createdAt_ttl` with `expireAfterSeconds: 86400`. The API also filters by the 24-hour cutoff because MongoDB TTL deletion runs asynchronously, so expired messages are excluded immediately from history, pagination, conversation previews, and unread counts.
+
+After starting the backend, verify the index in MongoDB Atlas Data Explorer by selecting the `bytalk.messages` collection and opening **Indexes**. It should show:
+
+```text
+message_createdAt_ttl: { createdAt: 1 }, expireAfterSeconds: 86400
+```
+
+The backend startup migration backfills `createdAt` from the legacy `at` field without changing users, subscriptions, or other collections.
+
 ## Start the Expo app
 
 In another terminal:
@@ -97,7 +167,8 @@ On macOS with Xcode, use `npx expo run:ios`. These commands generate native proj
 
 ## Features
 
-- Authenticated `GET /api/users/discover` returns other registered and seeded MongoDB users using real MongoDB IDs and only public profile fields. Password hashes, emails, and tokens are not returned.
+- Authenticated `GET /api/users/discover?topic=All%20Topics` returns other registered MongoDB users using real MongoDB IDs and only public profile fields. Results are ranked by language exchange fit, shared interests, proficiency compatibility, and online presence. Password hashes, emails, and tokens are not returned.
+- Practice partner filters use the persisted `practiceInterests` profile field. `PATCH /api/profile/practice-interests` saves validated interests for the authenticated account.
 - Discover partners with separate Chat, Voice, and Video actions, live online status, search, pull-to-refresh, and loading/error/empty states.
 - Authenticated one-to-one messaging persisted by the backend, live Socket.IO delivery, history pagination, timestamps, delivery/read markers, presence, and typing updates.
 - Authenticated call invitations, accept/reject, busy/offline checks, timeout handling, participant-only SDP/ICE signaling, reconnect/end cleanup, and persisted call history.
@@ -105,7 +176,7 @@ On macOS with Xcode, use `npx expo run:ios`. These commands generate native proj
 - Short-lived TURN credentials generated by the backend when TURN is configured.
 - The existing rooms, vocabulary, learning dashboard, and admin experiences remain available.
 
-Calls are only possible between signed-in users who are online in the app. Push notifications for calls while the app is closed, end-to-end encrypted messaging, and a production relational database are not included. Messages, rooms, vocabulary, reports, and call history still use the existing local JSON store for this local MVP. User accounts and profiles are stored in MongoDB Atlas. Use a transactional database for the remaining data and a durable shared Socket.IO adapter before scaling to multiple backend instances.
+Calls are only possible between signed-in users who are online in the app. Push notifications for calls while the app is closed, end-to-end encrypted messaging, and a production relational database are not included. Messages use MongoDB; room definitions, vocabulary, reports, and call history still use the existing local JSON store for this local MVP. User accounts and profiles are stored in MongoDB Atlas. Use a transactional database for the remaining data and a durable shared Socket.IO adapter before scaling to multiple backend instances.
 
 ## Two-account browser test
 
@@ -121,8 +192,10 @@ The application code and backend signaling can be validated locally, but success
 ## API overview
 
 - Public: `GET /api/health`, `POST /api/login`, `POST /api/register`.
-- Authenticated discovery: `GET /api/users/discover` (also available at the authenticated legacy alias `GET /api/partners`). `GET /api/users` returns the same safe public user shape.
+- Authenticated discovery: `GET /api/users/discover?topic=<topic>` (also available at the authenticated legacy alias `GET /api/partners`). The response contains `{ users, totalEligible }`, and supports `All Topics`, `Education`, `Travel`, `Culture`, `Work & Career`, `Hobbies`, `Movies & Music`, `Technology`, and `Daily Life`. `GET /api/users` returns the same safe public user shape.
 - Authenticated profile setup: `POST /api/onboard`.
+- Authenticated profile interests: `PATCH /api/profile/practice-interests` with `{ "practiceInterests": ["Education", "Technology"] }`.
 - Authenticated messaging: `GET /api/messages/:userId/:partnerId`, `POST /api/messages`.
 - Authenticated calling: `GET /api/rtc-config`, `GET /api/calls`; Socket.IO call events use the authenticated session and relay only between call participants.
+- Authenticated room media: `GET /api/rooms/:id/session`; Socket.IO room events are `room:join`, `room:leave`, `room:state`, `room:participant-joined`, and `room:participant-left`.
 - Other existing routes continue to provide onboarding, rooms, vocabulary, statistics, and reports.

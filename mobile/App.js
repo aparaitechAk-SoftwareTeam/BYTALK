@@ -16,6 +16,7 @@ import {
   useWindowDimensions,
   ActivityIndicator,
   KeyboardAvoidingView,
+  Linking,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -25,7 +26,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { createPeerConnection, getLocalMediaStream, makeIceCandidate, makeSessionDescription, setAudioRoute, startAudioRoute, stopAudioRoute, switchCamera } from './rtc';
 import CallAudio from './CallAudio';
 import CallVideo from './CallVideo';
-import { connectLiveRoom } from './src/liveRoom';
+import { configureSubscription, purchasePlan, restorePurchases } from './src/subscription';
 
 const welcomeImage = require('./assets/bytalk-welcome-art.png');
 
@@ -42,6 +43,8 @@ const SESSION_TOKEN_KEY = 'bytalk_session_token';
 const SESSION_USER_KEY = 'bytalk_session_user';
 const SESSION_EXPIRES_KEY = 'bytalk_session_expires_at';
 const FIFTEEN_DAYS_MS = 15 * 24 * 60 * 60 * 1000;
+const TERMS_URL = process.env.EXPO_PUBLIC_TERMS_URL || '';
+const PRIVACY_URL = process.env.EXPO_PUBLIC_PRIVACY_URL || '';
 
 export const authStorage = {
   async setItem(key, value) {
@@ -190,13 +193,6 @@ const muted = COLORS.textSecondary;
 const light = COLORS.lightBg;
 const border = COLORS.border;
 
-const fallbackRooms = [
-  { id: 'r1', name: 'Everyday English', topic: 'English', level: 'Beginner - Intermediate', listeners: 24 },
-  { id: 'r2', name: 'Travel stories', topic: 'Travel', level: 'Intermediate - Advanced', listeners: 18 },
-  { id: 'r3', name: 'Movies & culture', topic: 'Culture', level: 'All levels', listeners: 32 },
-  { id: 'r4', name: 'Language exchange', topic: 'Study', level: 'Beginner - Intermediate', listeners: 12 },
-];
-
 const LANGUAGES = [
   'English', 'Hindi', 'Marathi', 'Spanish', 'French', 'Japanese',
   'Mandarin Chinese', 'Arabic', 'German', 'Portuguese', 'Bengali',
@@ -204,6 +200,90 @@ const LANGUAGES = [
   'Tamil', 'Telugu', 'Vietnamese', 'Polish', 'Dutch', 'Greek',
   'Hebrew', 'Thai', 'Swedish', 'Czech', 'Hungarian', 'Romanian',
   'Danish', 'Finnish', 'Norwegian', 'Swahili', 'Malay', 'Ukrainian',
+];
+
+const PRACTICE_TOPICS = [
+  {
+    id: 'All Topics', title: 'All', icon: 'apps-outline',
+    description: 'Discover every registered partner with saved interests.',
+    phrases: ['Nice to meet you.', 'What do you enjoy?', 'How was your day?'],
+    vocabulary: ['conversation', 'practice', 'partner'],
+    prompt: 'Which phrase is a friendly way to start a conversation?',
+    options: ['Nice to meet you.', 'Where is the station?', 'I will send an update.'],
+    answer: 'Nice to meet you.',
+  },
+  {
+    id: 'Education', title: 'Education', icon: 'school-outline',
+    description: 'Study, exams, and academic discussions.',
+    phrases: ['Where is the station?', 'Could I have a ticket?', 'How long does it take?'],
+    vocabulary: ['journey', 'ticket', 'platform'],
+    prompt: 'Choose a phrase to ask for help understanding a lesson.',
+    options: ['Could you explain that?', 'Where is the station?', 'That sounds fun!'],
+    answer: 'Could you explain that?',
+  },
+  {
+    id: 'Travel', title: 'Travel', icon: 'airplane-outline',
+    description: 'Destinations, journeys, and travel experiences.',
+    phrases: ['Where is the station?', 'Could I have a ticket?', 'How long does it take?'],
+    vocabulary: ['journey', 'ticket', 'platform'],
+    prompt: 'Which phrase asks for directions?',
+    options: ['Where is the station?', 'I enjoy cooking.', 'Nice to meet you.'],
+    answer: 'Where is the station?',
+  },
+  {
+    id: 'Culture', title: 'Culture', icon: 'globe-outline',
+    description: 'Culture, traditions, food, and communities.',
+    phrases: ['What is this tradition?', 'I would love to learn more.', 'That is interesting.'],
+    vocabulary: ['tradition', 'festival', 'community'],
+    prompt: 'Which word describes a custom passed down over time?',
+    options: ['tradition', 'platform', 'assignment'],
+    answer: 'tradition',
+  },
+  {
+    id: 'Work & Career', title: 'Work & Career', icon: 'briefcase-outline',
+    description: 'Jobs, careers, and professional discussions.',
+    phrases: ['I work in ...', 'Let us discuss this.', 'I will send an update.'],
+    vocabulary: ['colleague', 'meeting', 'deadline'],
+    prompt: 'Which word means the latest time something should be finished?',
+    options: ['deadline', 'colleague', 'meeting'],
+    answer: 'deadline',
+  },
+  {
+    id: 'Hobbies', title: 'Hobbies', icon: 'color-palette-outline',
+    description: 'Interests, creativity, and free-time activities.',
+    phrases: ['What do you enjoy?', 'I like listening to music.', 'That sounds fun!'],
+    vocabulary: ['interest', 'creative', 'outdoors'],
+    prompt: 'How can you ask someone about their interests?',
+    options: ['What do you enjoy?', 'Could I have a ticket?', 'I will send an update.'],
+    answer: 'What do you enjoy?',
+  },
+  {
+    id: 'Movies & Music', title: 'Movies & Music', icon: 'musical-notes-outline',
+    description: 'Share recommendations and discuss entertainment.',
+    phrases: ['What are you watching?', 'What kind of music do you like?', 'I recommend ...'],
+    vocabulary: ['recommendation', 'actor', 'concert'],
+    prompt: 'Which phrase asks about someone’s music preferences?',
+    options: ['What kind of music do you like?', 'Where is the station?', 'I work in ...'],
+    answer: 'What kind of music do you like?',
+  },
+  {
+    id: 'Technology', title: 'Technology', icon: 'hardware-chip-outline',
+    description: 'Technology, programming, and digital ideas.',
+    phrases: ['What app do you use?', 'I am learning to code.', 'How does it work?'],
+    vocabulary: ['software', 'programming', 'device'],
+    prompt: 'Which phrase says that you are learning programming?',
+    options: ['I am learning to code.', 'That sounds fun!', 'Could I have a ticket?'],
+    answer: 'I am learning to code.',
+  },
+  {
+    id: 'Daily Life', title: 'Daily Life', icon: 'home-outline',
+    description: 'Everyday routines, errands, and practical conversation.',
+    phrases: ['How was your day?', 'What do you usually do?', 'I am heading home.'],
+    vocabulary: ['routine', 'errand', 'neighborhood'],
+    prompt: 'Which phrase asks about someone’s routine?',
+    options: ['What do you usually do?', 'I recommend ...', 'Where is the station?'],
+    answer: 'What do you usually do?',
+  },
 ];
 
 const COUNTRY_CODES = [
@@ -255,12 +335,14 @@ async function request(endpoint, options = {}) {
 
   const contentType = response.headers.get('content-type') || '';
   let data = null;
+  let responseWasJson = false;
   try {
     if (contentType.includes('application/json')) {
+      responseWasJson = true;
       data = await response.json();
     } else {
-      const text = await response.text();
-      data = { error: text || `HTTP ${response.status} ${response.statusText}` };
+      await response.text();
+      data = { error: `The backend returned an unexpected response (${response.status}).` };
     }
   } catch (jsonErr) {
     data = { error: 'Invalid response from server' };
@@ -276,6 +358,9 @@ async function request(endpoint, options = {}) {
     const err = new Error(message);
     err.status = response.status;
     err.data = data;
+    err.userMessage = responseWasJson
+      ? message
+      : 'The subscription service returned an unexpected response. Check that the backend is running on port 4000.';
     throw err;
   }
   return data;
@@ -397,24 +482,29 @@ function App() {
   const [nativeLanguage, setNativeLanguage] = useState('');
   const [learningLanguage, setLearningLanguage] = useState('English');
   const [level, setLevel] = useState('Beginner');
+  const [practiceInterests, setPracticeInterests] = useState([]);
+  const [practiceInterestsSaving, setPracticeInterestsSaving] = useState(false);
   const [partners, setPartners] = useState([]);
+  const [partnerTotalEligible, setPartnerTotalEligible] = useState(0);
   const [discoverLoading, setDiscoverLoading] = useState(false);
   const [discoverRefreshing, setDiscoverRefreshing] = useState(false);
   const [discoverError, setDiscoverError] = useState('');
-  const [rooms, setRooms] = useState(fallbackRooms);
-  const [activeRoom, setActiveRoom] = useState(null);
-  const [roomParticipants, setRoomParticipants] = useState([]);
-  const [roomStatus, setRoomStatus] = useState('idle');
-  const [roomError, setRoomError] = useState('');
-  const [roomMuted, setRoomMuted] = useState(false);
+  const [practiceTopic, setPracticeTopic] = useState(PRACTICE_TOPICS[0]);
+  const [practiceStep, setPracticeStep] = useState('overview');
+  const [practiceAnswer, setPracticeAnswer] = useState('');
+  const [practiceProgress, setPracticeProgress] = useState(0);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState({ id: null, name: 'BYTALK' });
   const [messages, setMessages] = useState([]);
   const [unreadByUser, setUnreadByUser] = useState({});
   const [conversations, setConversations] = useState([]);
   const [messageBanner, setMessageBanner] = useState(null);
+  const [subscription, setSubscription] = useState(null);
+  const [subscriptionPlans, setSubscriptionPlans] = useState([]);
+  const [subscriptionError, setSubscriptionError] = useState('');
+  const [subscriptionLoading, setSubscriptionLoading] = useState(false);
+  const [subscriptionBusy, setSubscriptionBusy] = useState(false);
   const [draft, setDraft] = useState('');
-  const [filter, setFilter] = useState('All');
   const [vocab, setVocab] = useState([]);
   const [word, setWord] = useState('');
   const [backendUp, setBackendUp] = useState(false);
@@ -437,8 +527,6 @@ function App() {
   const [callNotice, setCallNotice] = useState('');
   const [callStarting, setCallStarting] = useState(null);
   const socketRef = useRef(null);
-  const liveRoomRef = useRef(null);
-  const activeRoomRef = useRef(null);
   const peerRef = useRef(null);
   const callRef = useRef(null);
   const localStreamRef = useRef(null);
@@ -459,7 +547,6 @@ function App() {
   screenRef.current = screen;
   callRef.current = call;
   partnersRef.current = partners;
-  activeRoomRef.current = activeRoom;
 
   // Auth form states
   const [loginEmail, setLoginEmail] = useState('');
@@ -498,24 +585,96 @@ function App() {
     try {
       const isUp = await checkHealth();
       if (isUp) {
-        const [r, v] = await Promise.all([
-          request('rooms'),
+        const [v] = await Promise.all([
           activeAuthToken ? request(`vocabulary/${userId}`).catch(() => []) : Promise.resolve([]),
         ]);
-        console.log('[BYTALK room] API state', {
-          roomCount: Array.isArray(r) ? r.length : 0,
-          mediaAvailable: Array.isArray(r) ? r.filter((room) => room.mediaAvailable).length : 0,
-        });
-        setRooms(r);
         setVocab(v);
-        if (activeAuthToken) await loadDiscoverUsers(true);
       }
     } catch {
       setBackendUp(false);
     }
   };
 
-  async function loadDiscoverUsers(refreshing = false) {
+  async function loadSubscription() {
+    setSubscriptionLoading(true);
+    setSubscriptionError('');
+    try {
+      const [plans, current] = await Promise.all([
+        request('subscription/plans'),
+        request('subscription/status'),
+      ]);
+      setSubscriptionPlans(Array.isArray(plans) ? plans : []);
+      setSubscription(current);
+    } catch (error) {
+      setSubscriptionError(error.userMessage || error.message || 'Subscription status is unavailable.');
+    } finally {
+      setSubscriptionLoading(false);
+    }
+
+  }
+
+  function hasVideoEntitlement() {
+    if (!subscription || !['plus', 'pro'].includes(subscription.plan?.id)) return false;
+    if (!['active', 'cancelled'].includes(subscription.status)) return false;
+    return !subscription.expiresAt || new Date(subscription.expiresAt) > new Date();
+  }
+
+  async function openSubscription() {
+    setSubscriptionError('');
+    await loadSubscription();
+    setScreen('premium');
+  }
+
+  async function buySubscription(plan) {
+    setSubscriptionBusy(true);
+    setSubscriptionError('');
+    try {
+      const configured = await configureSubscription(userId);
+      if (!configured.available) throw new Error(configured.reason);
+      await purchasePlan(plan);
+      await loadSubscription();
+      Alert.alert('Purchase submitted', 'Your entitlement will unlock after the store provider confirms it.');
+    } catch (error) {
+      setSubscriptionError(error.message || 'Purchase could not be completed.');
+    } finally {
+      setSubscriptionBusy(false);
+    }
+  }
+
+  async function restoreSubscription() {
+    setSubscriptionBusy(true);
+    setSubscriptionError('');
+    try {
+      const configured = await configureSubscription(userId);
+      if (!configured.available) throw new Error(configured.reason);
+      await restorePurchases();
+      await loadSubscription();
+      Alert.alert('Restore submitted', 'Your provider entitlement will appear after server verification.');
+    } catch (error) {
+      setSubscriptionError(error.message || 'Purchases could not be restored.');
+    } finally {
+      setSubscriptionBusy(false);
+    }
+  }
+
+  async function grantDevelopmentSubscription(plan) {
+      setSubscriptionBusy(true);
+      setSubscriptionError('');
+      try {
+        const current = await request('subscription/development/grant', {
+          method: 'POST',
+          body: JSON.stringify({ plan }),
+        });
+        setSubscription(current);
+        Alert.alert('Development entitlement granted', `${current.plan.name} is active for local testing only.`);
+      } catch (error) {
+        setSubscriptionError(error.message || 'Development entitlement could not be granted.');
+      } finally {
+        setSubscriptionBusy(false);
+      }
+    }
+
+  async function loadDiscoverUsers(refreshing = false, topic = 'All Topics') {
     const requestId = ++discoverRequestRef.current;
     if (!activeAuthToken) {
       setPartners([]);
@@ -526,18 +685,21 @@ function App() {
     }
 
     if (refreshing) setDiscoverRefreshing(true);
-    else if (!partnersRef.current.length) setDiscoverLoading(true);
+    setDiscoverLoading(true);
     setDiscoverError('');
     try {
-      const users = await request('users/discover');
+      const result = await request(`users/discover?topic=${encodeURIComponent(topic)}`);
       if (requestId !== discoverRequestRef.current) return;
+      const users = Array.isArray(result) ? result : result?.users;
       setPartners(Array.isArray(users) ? users : []);
+      setPartnerTotalEligible(Number(result?.totalEligible) || (Array.isArray(users) ? users.length : 0));
       setDiscoverError('');
     } catch (error) {
       if (requestId !== discoverRequestRef.current) return;
       setDiscoverError(error.message || 'Could not load registered users. Check your connection and retry.');
       if (error.status === 401) {
         setPartners([]);
+        setPartnerTotalEligible(0);
         setSessionVersion((value) => value + 1);
         setScreen('welcome');
       }
@@ -578,14 +740,6 @@ function App() {
     setMuted(false);
     setCameraEnabled(true);
     setSpeakerEnabled(false);
-  }
-
-  function updateRoomList(roomId, participants) {
-    if (!roomId) return;
-    setRooms((previous) => previous.map((room) => room.id === roomId
-      ? { ...room, participants: participants.length, mediaAvailable: room.mediaAvailable }
-      : room));
-    if (activeRoomRef.current?.id === roomId) setRoomParticipants(participants);
   }
 
   async function notifyIncomingMessage(message) {
@@ -783,7 +937,9 @@ function App() {
         if (timeoutError) {
           reject(new Error('The server did not respond. Please try again.'));
         } else if (response?.error) {
-          reject(new Error(response.error));
+          const error = new Error(response.error);
+          error.code = response.code;
+          reject(error);
         } else {
           resolve(response || {});
         }
@@ -795,6 +951,11 @@ function App() {
     console.log('[BYTALK call] button pressed', { partnerId: partner?.id, type });
     if (!activeAuthToken) {
       Alert.alert('Sign in required', 'Sign in before starting a private call.');
+      return;
+    }
+    if (type === 'video' && !hasVideoEntitlement()) {
+      setSubscriptionError('BYTALK Plus or Pro is required for one-to-one video-call practice.');
+      await openSubscription();
       return;
     }
     if (!socketRef.current?.connected) {
@@ -852,7 +1013,12 @@ function App() {
       releaseCallMedia();
       updateCall(null);
       setScreen('discover');
-      Alert.alert('Could not start call', error.message || 'Check your connection and permissions.');
+      if (error.code === 'video_plan_required') {
+        setSubscriptionError(error.message);
+        setScreen('premium');
+      } else {
+        Alert.alert('Could not start call', error.message || 'Check your connection and permissions.');
+      }
     } finally {
       setCallStarting(null);
     }
@@ -946,6 +1112,7 @@ function App() {
           if (meRes.user.nativeLanguage) setNativeLanguage(meRes.user.nativeLanguage);
           if (meRes.user.learningLanguage) setLearningLanguage(meRes.user.learningLanguage);
           if (meRes.user.level) setLevel(meRes.user.level);
+          setPracticeInterests(Array.isArray(meRes.user.practiceInterests) ? meRes.user.practiceInterests : []);
           await authStorage.setItem(SESSION_USER_KEY, JSON.stringify(meRes.user));
           setScreen('discover');
         } else {
@@ -985,7 +1152,7 @@ function App() {
       socketRef.current = socket;
       socket.on('connect', () => {
         console.log('[BYTALK socket] connected', { api: API });
-        loadDiscoverUsers();
+        loadSubscription();
         request('messages/unread')
           .then(setUnreadByUser)
           .catch((error) => console.warn('[BYTALK message] unread count failed', error.message));
@@ -1013,14 +1180,6 @@ function App() {
       });
       socket.on('disconnect', (reason) => {
         console.warn('[BYTALK socket] disconnected', { reason });
-        if (activeRoomRef.current) {
-          liveRoomRef.current?.disconnect();
-          liveRoomRef.current = null;
-          setActiveRoom(null);
-          setRoomParticipants([]);
-          setRoomStatus('error');
-          setRoomError(`Live room disconnected: ${reason}`);
-        }
       });
       socket.on('error', (error) => {
         console.warn('[BYTALK socket] error', error?.message || 'unknown error');
@@ -1062,17 +1221,6 @@ function App() {
         setMessages((previous) => previous.map((message) => message.id === status.id ? { ...message, ...status } : message));
         refreshConversations();
       });
-      socket.on('rooms:changed', setRooms);
-      socket.on('room:state', ({ roomId, participants }) => {
-        console.log('[BYTALK room] state', { roomId, participantCount: participants?.length || 0 });
-        updateRoomList(roomId, participants || []);
-      });
-      socket.on('room:participant-joined', ({ roomId, participant }) => {
-        console.log('[BYTALK room] participant joined', { roomId, participantId: participant?.id });
-      });
-      socket.on('room:participant-left', ({ roomId, userId: changedUserId }) => {
-        console.log('[BYTALK room] participant left', { roomId, userId: changedUserId });
-      });
       socket.on('presence:update', ({ userId: changedId, online }) => {
         console.log('[BYTALK presence] update', { userId: changedId, online });
         setPartners((previous) => previous.map((partner) => partner.id === changedId ? { ...partner, online } : partner));
@@ -1098,8 +1246,9 @@ function App() {
           type: incoming.type,
           direction: 'incoming',
           status: 'Ringing',
+          restricted: Boolean(incoming.restricted),
         });
-        setCallNotice('');
+        setCallNotice(incoming.restrictionReason || '');
         setScreen('call');
         notifyIncomingCall(incoming);
       });
@@ -1143,8 +1292,6 @@ function App() {
     });
     return () => {
       active = false;
-      liveRoomRef.current?.disconnect();
-      liveRoomRef.current = null;
       if (socketRef.current === socket) socketRef.current = null;
       socket?.disconnect();
     };
@@ -1153,6 +1300,37 @@ function App() {
   useEffect(() => {
     if (!sessionChecking && screen === 'discover') loadDiscoverUsers();
   }, [screen, sessionChecking, sessionVersion, userId]);
+
+  useEffect(() => {
+    if (!sessionChecking && screen === 'practice') {
+      setPartners([]);
+      setPartnerTotalEligible(0);
+      loadDiscoverUsers(false, practiceTopic.id);
+    }
+  }, [screen, sessionChecking, sessionVersion, userId, practiceTopic.id]);
+
+  useEffect(() => {
+    if (sessionChecking || screen !== 'dashboard' || !activeAuthToken) return undefined;
+    let active = true;
+    request('auth/me').then((result) => {
+      if (!active || !result?.user) return;
+      setPracticeInterests(Array.isArray(result.user.practiceInterests) ? result.user.practiceInterests : []);
+    }).catch((error) => console.warn('[BYTALK profile] refresh failed', error.message));
+    return () => {
+      active = false;
+    };
+  }, [screen, sessionChecking, sessionVersion]);
+
+  useEffect(() => {
+    if (!userId) return undefined;
+    let active = true;
+    authStorage.getItem(`bytalk_practice_progress_${userId}`).then((value) => {
+      if (active && value) setPracticeProgress(Math.min(100, Number(value) || 0));
+    }).catch((error) => console.warn('[BYTALK practice] progress could not be loaded', error.message));
+    return () => {
+      active = false;
+    };
+  }, [userId]);
 
   useEffect(() => {
     if (screen === 'chat') {
@@ -1213,8 +1391,6 @@ function App() {
     peerRef.current?.connection?.close();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     stopAudioRoute();
-    liveRoomRef.current?.disconnect();
-    liveRoomRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -1262,6 +1438,7 @@ function App() {
         if (res.user.nativeLanguage) setNativeLanguage(res.user.nativeLanguage);
         if (res.user.learningLanguage) setLearningLanguage(res.user.learningLanguage);
         if (res.user.level) setLevel(res.user.level);
+        setPracticeInterests(Array.isArray(res.user.practiceInterests) ? res.user.practiceInterests : []);
         setLoginPassword('');
         setBackendUp(true);
         setScreen('discover');
@@ -1370,6 +1547,7 @@ function App() {
     setNativeLanguage('');
     setLearningLanguage('English');
     setLevel('Beginner');
+    setPracticeInterests([]);
     setPartners([]);
     setMessages([]);
     setUnreadByUser({});
@@ -1385,7 +1563,7 @@ function App() {
     try {
       await request('onboard', {
         method: 'POST',
-        body: JSON.stringify({ name, country, nativeLanguage, learningLanguage, level }),
+        body: JSON.stringify({ name, country, nativeLanguage, learningLanguage, level, practiceInterests }),
       });
       setBackendUp(true);
     } catch (error) {
@@ -1396,6 +1574,23 @@ function App() {
 
     setBusy(false);
     setScreen(next);
+  }
+
+  async function savePracticeInterests() {
+    setPracticeInterestsSaving(true);
+    try {
+      const updated = await request('profile/practice-interests', {
+        method: 'PATCH',
+        body: JSON.stringify({ practiceInterests }),
+      });
+      setPracticeInterests(Array.isArray(updated.practiceInterests) ? updated.practiceInterests : []);
+      Alert.alert('Interests saved', 'Your practice partner results will use these interests.');
+      if (screen === 'practice') loadDiscoverUsers(true, practiceTopic.id);
+    } catch (error) {
+      Alert.alert('Interests not saved', error.message || 'Could not update your practice interests.');
+    } finally {
+      setPracticeInterestsSaving(false);
+    }
   }
 
   async function send() {
@@ -1458,69 +1653,6 @@ function App() {
     }, 1400);
   }
 
-  async function join(room) {
-    if (activeRoomRef.current) {
-      Alert.alert('Already in a room', 'Leave your current room before joining another one.');
-      return;
-    }
-    if (!room.mediaAvailable) {
-      setRoomError('Live audio is unavailable because the media server is not configured.');
-      return;
-    }
-    if (!socketRef.current?.connected) {
-      setRoomError('Real-time service is disconnected. Reconnect before joining a room.');
-      return;
-    }
-    setRoomError('');
-    setRoomStatus('connecting');
-    try {
-      const session = await request(`rooms/${room.id}/session`);
-      const liveRoom = await connectLiveRoom({
-        url: session.url,
-        token: session.token,
-        onEvent: (event) => {
-          if (event.type === 'connection') console.log('[BYTALK room] media connection', { roomId: room.id, state: event.state });
-          if (event.type === 'track-subscribed') console.log('[BYTALK room] remote audio subscribed', { roomId: room.id, participantId: event.participantId });
-          if (event.type === 'disconnected' && activeRoomRef.current?.id === room.id) {
-            setRoomStatus('error');
-            setRoomError('The live audio connection ended.');
-          }
-        },
-      });
-      const response = await emitWithAck('room:join', { roomId: room.id });
-      liveRoomRef.current = liveRoom;
-      setActiveRoom(room);
-      setRoomParticipants(response.participants || []);
-      setRoomMuted(false);
-      setRoomStatus('connected');
-    } catch (error) {
-      liveRoomRef.current?.disconnect();
-      liveRoomRef.current = null;
-      setRoomStatus('error');
-      setRoomError(error.message || 'Could not join this live audio room.');
-      Alert.alert('Could not join room', error.message || 'Microphone permission or live audio connection failed.');
-    }
-  }
-
-  function leaveRoom() {
-    const roomId = activeRoomRef.current?.id;
-    if (roomId) socketRef.current?.emit('room:leave', { roomId });
-    liveRoomRef.current?.disconnect();
-    liveRoomRef.current = null;
-    activeRoomRef.current = null;
-    setActiveRoom(null);
-    setRoomParticipants([]);
-    setRoomMuted(false);
-    setRoomStatus('idle');
-  }
-
-  async function toggleRoomMute() {
-    if (!liveRoomRef.current) return;
-    const next = !roomMuted;
-    await liveRoomRef.current.setMuted(next);
-    setRoomMuted(next);
-  }
-
   async function addWord() {
     if (!word.trim()) return;
     try {
@@ -1535,9 +1667,32 @@ function App() {
     }
   }
 
+  function startPractice(topic = practiceTopic) {
+    setPracticeTopic(topic);
+    setPracticeAnswer('');
+    setPracticeStep('exercise');
+    setScreen('practiceSession');
+  }
+
+  async function completePractice() {
+    const nextProgress = Math.min(100, practiceProgress + 20);
+    setPracticeProgress(nextProgress);
+    setPracticeStep('complete');
+    try {
+      await authStorage.setItem(`bytalk_practice_progress_${userId}`, String(nextProgress));
+    } catch (error) {
+      console.warn('[BYTALK practice] progress could not be saved', error.message);
+    }
+  }
+
+  function openPractice() {
+    setPracticeStep('overview');
+    setScreen('practice');
+  }
+
   const tabItems = [
     ['discover', 'compass', 'Discover'],
-    ['rooms', 'mic', 'Rooms'],
+    ['practice', 'book-outline', 'Practice'],
     ['chat', 'chatbubbles', 'Messages'],
     ['dashboard', 'bar-chart', 'Profile'],
   ];
@@ -1547,6 +1702,7 @@ function App() {
       .toLowerCase()
       .includes(search.toLowerCase())
   );
+  const practicePartners = partners;
 
   const Header = ({ title, subtitle, onBack }) => (
     <View style={{ paddingHorizontal: 22, paddingTop: 14, paddingBottom: 14 }}>
@@ -2223,6 +2379,13 @@ function App() {
                   style={{ flex: 1, padding: 12, color: navy, fontSize: 14 }}
                 />
               </View>
+              <View style={{ paddingHorizontal: 22, paddingTop: 12 }}>
+                <Btn
+                  label={subscription?.plan?.id === 'plus' || subscription?.plan?.id === 'pro' ? 'Manage BYTALK Premium' : 'Unlock video-call practice'}
+                  outline
+                  onPress={openSubscription}
+                />
+              </View>
               <ScrollView
                 contentContainerStyle={{ padding: 22, flexGrow: 1 }}
                 refreshControl={
@@ -2324,22 +2487,24 @@ function App() {
                             </>
                           )}
                         </TouchableOpacity>
-                        <TouchableOpacity
-                          accessibilityRole="button"
-                          accessibilityLabel={`Video call ${p.name}`}
-                          onPress={() => startCall(p, 'video')}
-                          disabled={Boolean(callStarting)}
-                          style={styles.partnerAction}
-                        >
-                          {callStarting?.partnerId === p.id && callStarting.type === 'video' ? (
-                            <ActivityIndicator size="small" color={orange} />
-                          ) : (
-                            <>
-                              <Ionicons name="videocam-outline" size={18} color={orange} />
-                              <Txt color={orange} size={12} bold>Video</Txt>
-                            </>
-                          )}
-                        </TouchableOpacity>
+                        {hasVideoEntitlement() ? (
+                          <TouchableOpacity
+                            accessibilityRole="button"
+                            accessibilityLabel={`Video call ${p.name}`}
+                            onPress={() => startCall(p, 'video')}
+                            disabled={Boolean(callStarting)}
+                            style={styles.partnerAction}
+                          >
+                            {callStarting?.partnerId === p.id && callStarting.type === 'video' ? (
+                              <ActivityIndicator size="small" color={orange} />
+                            ) : (
+                              <>
+                                <Ionicons name="videocam-outline" size={18} color={orange} />
+                                <Txt color={orange} size={12} bold>Video</Txt>
+                              </>
+                            )}
+                          </TouchableOpacity>
+                        ) : null}
                       </View>
                     </View>
                   ))}
@@ -2536,7 +2701,17 @@ function App() {
                     <Ionicons name="call" size={23} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
                     <Txt color="#FFFFFF" size={11}>Decline</Txt>
                   </TouchableOpacity>
-                  <TouchableOpacity
+                  {call.restricted ? (
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      accessibilityLabel="Upgrade to accept video call"
+                      onPress={openSubscription}
+                      style={[styles.callControl, styles.acceptControl]}
+                    >
+                      <Ionicons name="star" size={23} color="#FFFFFF" />
+                      <Txt color="#FFFFFF" size={11}>Upgrade</Txt>
+                    </TouchableOpacity>
+                  ) : <TouchableOpacity
                     accessibilityRole="button"
                     accessibilityLabel="Accept incoming call"
                     onPress={acceptCall}
@@ -2544,7 +2719,7 @@ function App() {
                   >
                     <Ionicons name={call.type === 'video' ? 'videocam' : 'call'} size={23} color="#FFFFFF" />
                     <Txt color="#FFFFFF" size={11}>Accept</Txt>
-                  </TouchableOpacity>
+                  </TouchableOpacity>}
                 </View>
               ) : (
                 <View style={styles.callControls}>
@@ -2628,73 +2803,230 @@ function App() {
             </View>
           )}
 
-          {/* SCREEN 8: LIVE SPEAKING ROOMS */}
-          {screen === 'rooms' && (
-            <>
-              <Header title="Live speaking rooms" subtitle="Join live audio rooms to practice with people around the world." />
-              {roomError ? (
-                <View style={{ marginHorizontal: 20, marginBottom: 12, padding: 12, borderRadius: 12, backgroundColor: '#FFF0ED' }}>
-                  <Txt color={COLORS.error} size={12}>{roomError}</Txt>
+          {/* SCREEN 8: LANGUAGE PRACTICE */}
+          {screen === 'practice' && (
+            <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 30 }}>
+              <Header title="Language Practice" subtitle={`Build confidence in ${learningLanguage || 'your learning language'} with short daily exercises.`} />
+              <View style={styles.practiceProgressCard}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <View>
+                    <Txt size={16} bold>Daily Practice</Txt>
+                    <Txt size={12} color={muted} style={{ marginTop: 4 }}>{practiceProgress}% complete today</Txt>
+                  </View>
+                  <Txt size={20} bold color={orange}>{practiceProgress}%</Txt>
+                </View>
+                <View style={styles.progressTrack}>
+                  <View style={[styles.progressFill, { width: `${practiceProgress}%` }]} />
+                </View>
+                <Btn label="Start Practice" onPress={() => startPractice()} style={{ marginTop: 15 }} />
+              </View>
+
+              <Txt size={17} bold style={{ marginBottom: 12 }}>Choose a conversation topic</Txt>
+              {PRACTICE_TOPICS.map((topic) => (
+                <TouchableOpacity
+                  key={topic.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Practice ${topic.title}`}
+                  onPress={() => setPracticeTopic(topic)}
+                  style={[styles.practiceTopicCard, practiceTopic.id === topic.id && styles.practiceTopicCardSelected]}
+                >
+                  <View style={styles.practiceTopicIcon}>
+                    <Ionicons name={topic.icon} size={22} color={orange} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Txt size={15} bold>{topic.title}</Txt>
+                    <Txt size={12} color={muted} style={{ marginTop: 3 }}>{topic.description}</Txt>
+                  </View>
+                  <Ionicons name="chevron-forward" size={18} color={muted} />
+                </TouchableOpacity>
+              ))}
+              <Txt size={17} bold style={{ marginTop: 18, marginBottom: 10 }}>
+                {practiceTopic.title} partners
+              </Txt>
+              {discoverError ? (
+                <View style={styles.discoverMessage}>
+                  <Txt color={COLORS.error} size={13} style={{ textAlign: 'center' }}>{discoverError}</Txt>
+                  <TouchableOpacity onPress={() => loadDiscoverUsers(true, practiceTopic.id)} style={styles.discoverRetry}>
+                    <Ionicons name="refresh" size={16} color={orange} />
+                    <Txt color={orange} size={13} bold>Retry</Txt>
+                  </TouchableOpacity>
                 </View>
               ) : null}
-              {activeRoom && (
-                <View style={{ marginHorizontal: 20, marginBottom: 16, padding: 16, borderRadius: 16, backgroundColor: '#FFF0E8', borderWidth: 1, borderColor: '#FFD8C9' }}>
-                  <Txt bold size={16}>Live in {activeRoom.name}</Txt>
-                  <Txt color={muted} size={12} style={{ marginTop: 4 }}>
-                    {roomParticipants.length} connected participant{roomParticipants.length === 1 ? '' : 's'}
+              {discoverLoading ? (
+                <View style={styles.discoverMessage}>
+                  <ActivityIndicator color={orange} />
+                  <Txt size={13} color={muted} style={{ marginTop: 10 }}>Finding registered partners…</Txt>
+                </View>
+              ) : null}
+              {!discoverLoading && !discoverError && practicePartners.length === 0 ? (
+                <View style={styles.discoverMessage}>
+                  <Ionicons name="people-outline" size={34} color={muted} />
+                  <Txt size={14} color={muted} style={{ marginTop: 10, textAlign: 'center' }}>
+                    {partnerTotalEligible === 0
+                      ? 'No partners have joined yet. Invite a friend to start practicing.'
+                      : 'No partners found for this topic. Try All or another topic.'}
                   </Txt>
-                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
-                    <Btn label={roomMuted ? 'Unmute microphone' : 'Mute microphone'} outline onPress={toggleRoomMute} style={{ flex: 1 }} />
-                    <Btn label="Leave room" onPress={leaveRoom} style={{ flex: 1, backgroundColor: COLORS.error }} />
+                </View>
+              ) : null}
+              {!discoverLoading && !discoverError && practicePartners.map((p) => (
+                <View key={p.id} style={styles.partnerCard}>
+                  <View style={styles.partnerInfoRow}>
+                    <View style={[styles.avatarCircle, { backgroundColor: '#FFE0D3' }]}>
+                      {p.avatarUrl ? (
+                        <Image source={{ uri: p.avatarUrl }} style={styles.partnerAvatarImage} />
+                      ) : (
+                        <Txt size={20} bold color={orange}>{(p.displayName || p.name || '?').trim().charAt(0).toUpperCase()}</Txt>
+                      )}
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 12 }}>
+                      <Txt bold size={15}>{p.displayName || p.name}  <Txt size={12} color={muted}>{p.country}</Txt></Txt>
+                      <Txt size={11} color={muted} style={{ marginTop: 2 }}>Speaks: {p.nativeLanguage}, {p.learningLanguage}</Txt>
+                      <Txt size={11} color={COLORS.primary} style={{ marginTop: 2, fontWeight: '600' }}>{p.level} · {p.learningLanguage}</Txt>
+                      <Txt size={10} color={p.online ? COLORS.success : muted} style={{ marginTop: 3 }}>{p.online ? '● Online' : '● Offline'}</Txt>
+                    </View>
+                  </View>
+                  <View style={styles.partnerActions}>
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      accessibilityLabel={`Chat with ${p.name}`}
+                      onPress={() => openConversation(p)}
+                      style={[styles.chatButtonOutline, styles.partnerAction]}
+                    >
+                      <Ionicons name="chatbubble-ellipses-outline" size={17} color={orange} />
+                      <Txt color={orange} size={12} bold>Start chat</Txt>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => startCall(p, 'audio')} disabled={Boolean(callStarting)} style={styles.partnerAction}>
+                      <Ionicons name="call-outline" size={17} color={orange} />
+                      <Txt color={orange} size={12} bold>Voice</Txt>
+                    </TouchableOpacity>
+                    {hasVideoEntitlement() ? (
+                      <TouchableOpacity onPress={() => startCall(p, 'video')} disabled={Boolean(callStarting)} style={styles.partnerAction}>
+                        <Ionicons name="videocam-outline" size={17} color={orange} />
+                        <Txt color={orange} size={12} bold>Video</Txt>
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity onPress={openSubscription} style={styles.partnerAction}>
+                        <Ionicons name="lock-closed-outline" size={17} color={muted} />
+                        <Txt color={muted} size={12} bold>Video</Txt>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 </View>
-              )}
-              <ScrollView contentContainerStyle={{ paddingHorizontal: 20 }}>
-                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 18 }}>
-                  {['All', 'English', 'Travel', 'Culture', 'Study'].map((f) => (
+              ))}
+              <Btn label="Start Practice Exercise" onPress={() => startPractice()} style={{ marginTop: 8 }} />
+            </ScrollView>
+          )}
+
+          {screen === 'practiceSession' && (
+            <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 30 }}>
+              <Header title={practiceTopic.title} subtitle={`Practice in ${learningLanguage || 'your learning language'}`} onBack={openPractice} />
+              {practiceStep === 'exercise' ? (
+                <>
+                  <View style={styles.practicePromptCard}>
+                    <Txt size={12} color={orange} bold>QUICK EXERCISE</Txt>
+                    <Txt size={19} bold style={{ marginTop: 10, lineHeight: 27 }}>{practiceTopic.prompt}</Txt>
+                  </View>
+                  {practiceTopic.options.map((option) => (
                     <TouchableOpacity
-                      key={f}
-                      onPress={() => setFilter(f)}
-                      style={{
-                        backgroundColor: filter === f ? orange : light,
-                        paddingHorizontal: 14,
-                        paddingVertical: 8,
-                        borderRadius: 20,
-                      }}
+                      key={option}
+                      accessibilityRole="button"
+                      onPress={() => setPracticeAnswer(option)}
+                      style={[styles.practiceOption, practiceAnswer === option && styles.practiceOptionSelected]}
                     >
-                      <Txt size={12} color={filter === f ? '#fff' : navy} bold={filter === f}>{f}</Txt>
+                      <Ionicons name={practiceAnswer === option ? 'checkmark-circle' : 'ellipse-outline'} size={21} color={practiceAnswer === option ? orange : muted} />
+                      <Txt size={14} color={practiceAnswer === option ? orange : navy} bold={practiceAnswer === option} style={{ flex: 1 }}>{option}</Txt>
                     </TouchableOpacity>
                   ))}
+                  <Btn
+                    label="Check answer"
+                    disabled={!practiceAnswer}
+                    onPress={() => {
+                      if (practiceAnswer === practiceTopic.answer) completePractice();
+                      else Alert.alert('Keep trying', 'Review the phrases and choose the best answer.');
+                    }}
+                    style={{ marginTop: 8 }}
+                  />
+                </>
+              ) : (
+                <>
+                  <View style={styles.practiceCompleteCard}>
+                    <Ionicons name="checkmark-circle" size={54} color={COLORS.success} />
+                    <Txt size={21} bold style={{ marginTop: 12 }}>Great practice!</Txt>
+                    <Txt color={muted} size={13} style={{ textAlign: 'center', marginTop: 8 }}>
+                      You completed {practiceTopic.title}. Keep going to build your daily streak.
+                    </Txt>
+                  </View>
+                  <Txt size={17} bold style={{ marginBottom: 10 }}>Useful phrases</Txt>
+                  {practiceTopic.phrases.map((phrase) => <View key={phrase} style={styles.phraseRow}><Ionicons name="chatbubble-ellipses-outline" size={18} color={orange} /><Txt size={14} style={{ flex: 1 }}>{phrase}</Txt></View>)}
+                  <Txt size={17} bold style={{ marginTop: 16, marginBottom: 10 }}>Vocabulary</Txt>
+                  <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                    {practiceTopic.vocabulary.map((item) => <View key={item} style={styles.vocabularyChip}><Txt size={12} color={orange} bold>{item}</Txt></View>)}
+                  </View>
+                  <Btn label="Practice another topic" outline onPress={openPractice} style={{ marginTop: 20 }} />
+                  <Btn label="Find a practice partner" onPress={() => setScreen('discover')} style={{ marginTop: 10 }} />
+                </>
+              )}
+            </ScrollView>
+          )}
+
+          {screen === 'premium' && (
+            <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 32 }}>
+              <Header title="BYTALK Premium" subtitle="Choose the plan that fits your language journey." onBack={() => setScreen('dashboard')} />
+              {subscriptionError ? (
+                <View style={{ padding: 12, borderRadius: 12, backgroundColor: '#FFF0ED', marginBottom: 14 }}>
+                  <Txt color={COLORS.error} size={12}>{subscriptionError}</Txt>
+                  <Btn label="Retry" outline onPress={loadSubscription} disabled={subscriptionLoading} style={{ marginTop: 10, paddingVertical: 10 }} />
                 </View>
-                {rooms
-                  .filter((r) => filter === 'All' || r.topic === filter)
-                  .map((room, i) => (
-                    <View key={room.id} style={styles.roomCard}>
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                        <View style={{ backgroundColor: ['#FFE3C9', '#CDE8FB', '#E1F5E5', '#E7DDFE'][i % 4], borderRadius: 12, padding: 12 }}>
-                          <Txt size={22}>{['🎙️', '✈️', '🎬', '💬'][i % 4]}</Txt>
-                        </View>
-                        <View style={{ flex: 1 }}>
-                          <Txt bold size={15}>{room.name}</Txt>
-                          <Txt size={12} color={muted} style={{ marginTop: 2 }}>{room.level}</Txt>
-                        </View>
-                        <Txt size={11} color={room.mediaAvailable ? '#16ac64' : muted} bold>
-                          {room.mediaAvailable ? '● Live' : 'Unavailable'}
-                        </Txt>
-                      </View>
-                      <Txt size={12} color={muted} style={{ marginVertical: 14 }}>
-                        👥 {room.participants || 0} connected
-                      </Txt>
-                      <Btn
-                        label={roomStatus === 'connecting' ? 'Connecting...' : activeRoom?.id === room.id ? 'Joined' : 'Join room'}
-                        onPress={() => join(room)}
-                        disabled={!room.mediaAvailable || Boolean(activeRoom)}
-                        loading={roomStatus === 'connecting' && activeRoom?.id !== room.id}
-                      />
-                    </View>
-                  ))}
-              </ScrollView>
-            </>
+              ) : null}
+              {subscriptionLoading && subscriptionPlans.length === 0 ? (
+                <View style={{ padding: 24, alignItems: 'center' }}>
+                  <ActivityIndicator color={orange} />
+                  <Txt size={12} color={muted} style={{ marginTop: 10 }}>Loading subscription plans…</Txt>
+                </View>
+              ) : null}
+              <Txt size={12} color={muted} style={{ marginBottom: 14 }}>
+                Current plan: <Txt bold color={navy}>{subscription?.plan?.name || 'Loading...'}</Txt> · {subscription?.status || 'unknown'}
+              </Txt>
+              {subscription?.expiresAt ? (
+                <Txt size={11} color={muted} style={{ marginBottom: 14 }}>
+                  {subscription.status === 'active' ? 'Renews or expires' : 'Expired'}: {new Date(subscription.expiresAt).toLocaleDateString()}
+                  {subscription.renewalStatus ? ` · ${subscription.renewalStatus}` : ''}
+                </Txt>
+              ) : null}
+              {!subscriptionLoading && subscriptionPlans.length === 0 && !subscriptionError ? (
+                <Txt size={12} color={muted} style={{ marginBottom: 14 }}>No subscription plans are currently available.</Txt>
+              ) : null}
+              {subscriptionPlans.map((plan) => (
+                <View key={plan.id} style={{ padding: 18, borderRadius: 16, borderWidth: plan.id === subscription?.plan?.id ? 2 : 1, borderColor: plan.id === subscription?.plan?.id ? orange : '#E9E7EF', backgroundColor: '#fff', marginBottom: 14 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <Txt size={18} bold>{plan.name}</Txt>
+                    <Txt size={16} bold color={orange}>{plan.priceInr === 0 ? 'Free' : `₹${plan.priceInr}/${plan.billingInterval || 'month'}`}</Txt>
+                  </View>
+                  {plan.features.map((feature) => <Txt key={feature} size={12} color={muted} style={{ marginTop: 9 }}>✓ {feature}</Txt>)}
+                  {plan.id !== 'free' && plan.id !== subscription?.plan?.id ? (
+                    <Btn label={subscriptionBusy ? 'Processing...' : `Upgrade to ${plan.name}`} onPress={() => buySubscription(plan)} disabled={subscriptionBusy} style={{ marginTop: 14 }} />
+                  ) : null}
+                </View>
+              ))}
+              <Btn label="Restore purchases" outline onPress={restoreSubscription} disabled={subscriptionBusy} style={{ marginBottom: 14 }} />
+              {subscription?.testMode ? (
+                <View style={{ padding: 14, borderRadius: 12, backgroundColor: '#FFF8E8', marginBottom: 14 }}>
+                  <Txt size={12} bold color="#8A5A00">Development-only test entitlements</Txt>
+                  <Txt size={11} color="#8A5A00" style={{ marginTop: 5 }}>These controls are disabled when NODE_ENV is production and never represent a store purchase.</Txt>
+                  <View style={{ flexDirection: 'row', marginTop: 10 }}>
+                    <Btn label="Test Plus" onPress={() => grantDevelopmentSubscription('plus')} disabled={subscriptionBusy} style={{ flex: 1, marginRight: 6 }} />
+                    <Btn label="Test Pro" onPress={() => grantDevelopmentSubscription('pro')} disabled={subscriptionBusy} style={{ flex: 1, marginLeft: 6 }} />
+                  </View>
+                </View>
+              ) : null}
+              <Txt size={11} color={muted} style={{ lineHeight: 17 }}>
+                Subscriptions renew monthly unless cancelled in your App Store or Google Play account. Web browsers do not support native in-app purchases in this build.
+              </Txt>
+              <View style={{ flexDirection: 'row', marginTop: 12 }}>
+                {TERMS_URL ? <TouchableOpacity onPress={() => Linking.openURL(TERMS_URL)}><Txt size={12} color={orange} bold>Terms</Txt></TouchableOpacity> : null}
+                {PRIVACY_URL ? <TouchableOpacity onPress={() => Linking.openURL(PRIVACY_URL)} style={{ marginLeft: 18 }}><Txt size={12} color={orange} bold>Privacy</Txt></TouchableOpacity> : null}
+              </View>
+            </ScrollView>
           )}
 
           {/* SCREEN 9: LEARNING DASHBOARD */}
@@ -2782,7 +3114,38 @@ function App() {
                   );
                 })}
               </Section>
+              <Section title="Practice interests">
+                <Txt size={12} color={muted} style={{ marginBottom: 10 }}>
+                  Choose the topics you want partners to see when they practice with you.
+                </Txt>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                  {PRACTICE_TOPICS.filter((topic) => topic.id !== 'All Topics').map((topic) => {
+                    const selectedInterest = practiceInterests.includes(topic.id);
+                    return (
+                      <TouchableOpacity
+                        key={topic.id}
+                        accessibilityRole="checkbox"
+                        accessibilityState={{ checked: selectedInterest }}
+                        onPress={() => setPracticeInterests((previous) => selectedInterest
+                          ? previous.filter((interest) => interest !== topic.id)
+                          : [...previous, topic.id])}
+                        style={[styles.interestChip, selectedInterest && styles.interestChipSelected]}
+                      >
+                        <Ionicons name={selectedInterest ? 'checkmark-circle' : 'ellipse-outline'} size={16} color={selectedInterest ? orange : muted} />
+                        <Txt size={12} color={selectedInterest ? orange : navy} bold={selectedInterest}>{topic.title}</Txt>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <Btn
+                  label={practiceInterestsSaving ? 'Saving...' : 'Save practice interests'}
+                  onPress={savePracticeInterests}
+                  disabled={practiceInterestsSaving}
+                  style={{ marginTop: 14 }}
+                />
+              </Section>
               <Btn label="Update my level" outline onPress={() => setScreen('level')} style={{ marginBottom: 12 }} />
+              <Btn label="BYTALK Premium" onPress={openSubscription} style={{ marginBottom: 12 }} />
               <Btn label="Log Out / Sign Out" outline onPress={handleLogout} style={{ marginBottom: 12 }} />
               <Btn label="Back to Welcome Screen" outline onPress={() => setScreen('welcome')} />
             </ScrollView>
@@ -2794,6 +3157,10 @@ function App() {
               {tabItems.map(([id, icon, label]) => (
                 <TouchableOpacity key={id} onPress={() => {
                   if (id === 'chat') requestNotificationPermission();
+                  if (id === 'practice') {
+                    setSearch('');
+                    setPracticeTopic(PRACTICE_TOPICS[0]);
+                  }
                   setScreen(id === 'chat' ? 'messages' : id);
                 }} style={styles.tabItem}>
                   <Ionicons name={icon} size={22} color={screen === id || (id === 'chat' && screen === 'messages') ? orange : '#98a3b3'} />
@@ -3358,13 +3725,107 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  roomCard: {
+  practiceProgressCard: {
+    padding: 18,
+    borderRadius: 18,
+    marginBottom: 22,
+    backgroundColor: '#FFF0E8',
+    borderWidth: 1,
+    borderColor: '#FFD8C9',
+  },
+  progressTrack: {
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#FFFFFF',
+    marginTop: 14,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 4,
+    backgroundColor: orange,
+  },
+  practiceTopicCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 14,
+    marginBottom: 10,
     borderWidth: 1,
     borderColor: border,
+    borderRadius: 16,
+    backgroundColor: '#FFFFFF',
+  },
+  practiceTopicCardSelected: {
+    borderColor: orange,
+    backgroundColor: '#FFF8F4',
+  },
+  practiceTopicIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFF0E8',
+  },
+  practicePromptCard: {
+    padding: 20,
     borderRadius: 18,
-    padding: 18,
-    marginBottom: 14,
-    backgroundColor: '#fff',
+    backgroundColor: '#FFF0E8',
+    borderWidth: 1,
+    borderColor: '#FFD8C9',
+    marginBottom: 16,
+  },
+  practiceOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 16,
+    borderWidth: 1,
+    borderColor: border,
+    borderRadius: 14,
+    marginBottom: 10,
+    backgroundColor: '#FFFFFF',
+  },
+  practiceOptionSelected: {
+    borderColor: orange,
+    backgroundColor: '#FFF8F4',
+  },
+  practiceCompleteCard: {
+    alignItems: 'center',
+    padding: 24,
+    borderRadius: 18,
+    backgroundColor: '#F0FBF5',
+    marginBottom: 22,
+  },
+  phraseRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    padding: 13,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F3F7',
+  },
+  vocabularyChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 18,
+    backgroundColor: '#FFF0E8',
+  },
+  interestChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: border,
+    backgroundColor: '#FFFFFF',
+  },
+  interestChipSelected: {
+    borderColor: orange,
+    backgroundColor: '#FFF0E8',
   },
   statsCard: {
     flexDirection: 'row',
