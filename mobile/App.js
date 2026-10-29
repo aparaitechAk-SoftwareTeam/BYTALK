@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -10,65 +10,286 @@ import {
   Platform,
   Alert,
   Image,
+  RefreshControl,
   StyleSheet,
   Dimensions,
-  Modal,
+  useWindowDimensions,
+  ActivityIndicator,
+  KeyboardAvoidingView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { io } from 'socket.io-client';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { LinearGradient } from 'expo-linear-gradient';
+import { createPeerConnection, getLocalMediaStream, makeIceCandidate, makeSessionDescription, setAudioRoute, startAudioRoute, stopAudioRoute, switchCamera } from './rtc';
+import CallAudio from './CallAudio';
+import CallVideo from './CallVideo';
+import { connectLiveRoom } from './src/liveRoom';
 
-import UserDashboard from './src/components/UserDashboard';
+const welcomeImage = require('./assets/bytalk-welcome-art.png');
 
-const { height: screenHeight } = Dimensions.get('window');
-const API = process.env.EXPO_PUBLIC_API_URL || (Platform.OS === 'android' ? 'http://10.0.2.2:4000' : 'http://localhost:4000');
+// Secure storage adapter:
+// Uses Expo SecureStore on native builds (iOS / Android) and AsyncStorage on Web
+let ExpoSecureStore = null;
+try {
+  ExpoSecureStore = require('expo-secure-store');
+} catch (e) {
+  ExpoSecureStore = null;
+}
 
-const orange = '#FF6847';
-const orangeDark = '#FF5226';
-const orangeLight = '#FFF4EE';
-const navy = '#141727';
-const muted = '#6B7280';
-const light = '#F8FAFC';
-const border = '#E5E7EB';
+const SESSION_TOKEN_KEY = 'bytalk_session_token';
+const SESSION_USER_KEY = 'bytalk_session_user';
+const SESSION_EXPIRES_KEY = 'bytalk_session_expires_at';
+const FIFTEEN_DAYS_MS = 15 * 24 * 60 * 60 * 1000;
 
-const fallbackPartners = [
-  { id: 'u2', name: 'Yuki', alias: 'YukiTokyo', country: 'Japan', nativeLanguage: 'Japanese', learningLanguage: 'English', level: 'Intermediate', online: true },
-  { id: 'u3', name: 'Lucas', alias: 'LucasRio', country: 'Brazil', nativeLanguage: 'Portuguese', learningLanguage: 'English', level: 'Beginner', online: true },
-  { id: 'u4', name: 'Minji', alias: 'MinjiSeoul', country: 'South Korea', nativeLanguage: 'Korean', learningLanguage: 'English', level: 'Intermediate', online: true },
-  { id: 'u5', name: 'Carlos', alias: 'CarlosMex', country: 'Mexico', nativeLanguage: 'Spanish', learningLanguage: 'English', level: 'Intermediate', online: true },
-  { id: 'u6', name: 'Aditi', alias: 'Aditi_In', country: 'India', nativeLanguage: 'Hindi', learningLanguage: 'English', level: 'Beginner', online: true },
-];
+export const authStorage = {
+  async setItem(key, value) {
+    if (Platform.OS !== 'web' && ExpoSecureStore?.setItemAsync) {
+      try {
+        await ExpoSecureStore.setItemAsync(key, value);
+        return;
+      } catch (err) {
+        // Fallback to AsyncStorage if SecureStore fails
+      }
+    }
+    await AsyncStorage.setItem(key, value);
+  },
+  async getItem(key) {
+    if (Platform.OS !== 'web' && ExpoSecureStore?.getItemAsync) {
+      try {
+        const val = await ExpoSecureStore.getItemAsync(key);
+        if (val !== null && val !== undefined) return val;
+      } catch (err) {
+        // Fallback to AsyncStorage
+      }
+    }
+    return AsyncStorage.getItem(key);
+  },
+  async removeItem(key) {
+    if (Platform.OS !== 'web' && ExpoSecureStore?.deleteItemAsync) {
+      try {
+        await ExpoSecureStore.deleteItemAsync(key);
+      } catch (err) {
+        // Fallback to AsyncStorage
+      }
+    }
+    await AsyncStorage.removeItem(key);
+  },
+};
+
+let activeAuthToken = null;
+
+export function getAuthToken() {
+  return activeAuthToken;
+}
+
+export function setAuthToken(token) {
+  activeAuthToken = token;
+}
+
+export async function saveSession(authResponse, fallbackName = '') {
+  if (!authResponse?.token) {
+    throw new Error('Authentication token was not returned by the server.');
+  }
+  const token = authResponse.token;
+  const user = authResponse.user || { name: fallbackName };
+  const expiresAt = Date.now() + FIFTEEN_DAYS_MS;
+
+  setAuthToken(token);
+  await Promise.all([
+    authStorage.setItem(SESSION_TOKEN_KEY, token),
+    authStorage.setItem(SESSION_USER_KEY, JSON.stringify(user)),
+    authStorage.setItem(SESSION_EXPIRES_KEY, String(expiresAt)),
+  ]);
+}
+
+export async function clearSession() {
+  setAuthToken(null);
+  await Promise.all([
+    authStorage.removeItem(SESSION_TOKEN_KEY).catch(() => {}),
+    authStorage.removeItem(SESSION_USER_KEY).catch(() => {}),
+    authStorage.removeItem(SESSION_EXPIRES_KEY).catch(() => {}),
+  ]);
+}
+
+// Runtime-aware API base URL resolution
+function getApiUrl() {
+  // 1. Explicit environment variable override
+  if (process.env.EXPO_PUBLIC_API_URL) {
+    const configuredUrl = process.env.EXPO_PUBLIC_API_URL.replace(/\/+$/, '');
+    const isNativeLocalhost = Platform.OS !== 'web' && /:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(configuredUrl);
+    if (!isNativeLocalhost) return configuredUrl;
+    console.warn('[BYTALK] EXPO_PUBLIC_API_URL uses localhost on a native target; resolving the Expo host instead.');
+  }
+
+  // 2. Web browser runtime
+  if (Platform.OS === 'web') {
+    if (typeof window !== 'undefined' && window.location?.hostname) {
+      const host = window.location.hostname;
+      if (host && host !== 'localhost' && host !== '127.0.0.1') {
+        return `http://${host}:4000`;
+      }
+    }
+    return 'http://localhost:4000';
+  }
+
+  // 3. Android Emulator / Device
+  if (Platform.OS === 'android') {
+    let metroHost = null;
+    try {
+      const Constants = require('expo-constants').default;
+      const hostUri = Constants?.expoConfig?.hostUri || Constants?.manifest2?.extra?.expoClient?.hostUri || Constants?.manifest?.debuggerHost;
+      if (hostUri) metroHost = hostUri.split(':')[0];
+    } catch (e) {}
+
+    if (metroHost && metroHost !== 'localhost' && metroHost !== '127.0.0.1') {
+      return `http://${metroHost}:4000`;
+    }
+    return 'http://10.0.2.2:4000';
+  }
+
+  // 4. iOS Simulator / Device
+  if (Platform.OS === 'ios') {
+    let metroHost = null;
+    try {
+      const Constants = require('expo-constants').default;
+      const hostUri = Constants?.expoConfig?.hostUri || Constants?.manifest2?.extra?.expoClient?.hostUri || Constants?.manifest?.debuggerHost;
+      if (hostUri) metroHost = hostUri.split(':')[0];
+    } catch (e) {}
+
+    if (metroHost && metroHost !== 'localhost' && metroHost !== '127.0.0.1') {
+      return `http://${metroHost}:4000`;
+    }
+    return 'http://localhost:4000';
+  }
+
+  return 'http://localhost:4000';
+}
+
+const API = getApiUrl();
+
+// Section 3: Orange Design System Palette
+const COLORS = {
+  primary: '#FF693D',
+  secondary: '#FF8A50',
+  lightBg: '#FFF7F2',
+  softSurface: '#FFF0E8',
+  textPrimary: '#17172F',
+  textSecondary: '#747487',
+  border: '#E9E7EF',
+  white: '#FFFFFF',
+  error: '#D92D20',
+  success: '#168653',
+};
+
+const orange = COLORS.primary;
+const orangeLight = COLORS.lightBg;
+const navy = COLORS.textPrimary;
+const muted = COLORS.textSecondary;
+const light = COLORS.lightBg;
+const border = COLORS.border;
 
 const fallbackRooms = [
-  { id: 'r1', name: 'Everyday English', topic: 'Daily English', level: 'Beginner - Intermediate', listeners: 24, capacity: 50, speakers: ['u1'] },
-  { id: 'r2', name: 'Job Interview Practice', topic: 'Interviews', level: 'Intermediate - Advanced', listeners: 18, capacity: 30, speakers: ['u2'] },
-  { id: 'r3', name: 'IELTS Speaking Prep', topic: 'IELTS Practice', level: 'All levels', listeners: 32, capacity: 50, speakers: ['u4'] },
-  { id: 'r4', name: 'Travel & Free Conversation', topic: 'Travel', level: 'Beginner - Intermediate', listeners: 12, capacity: 40, speakers: [] },
+  { id: 'r1', name: 'Everyday English', topic: 'English', level: 'Beginner - Intermediate', listeners: 24 },
+  { id: 'r2', name: 'Travel stories', topic: 'Travel', level: 'Intermediate - Advanced', listeners: 18 },
+  { id: 'r3', name: 'Movies & culture', topic: 'Culture', level: 'All levels', listeners: 32 },
+  { id: 'r4', name: 'Language exchange', topic: 'Study', level: 'Beginner - Intermediate', listeners: 12 },
 ];
 
-async function request(endpoint, options = {}, token = null) {
-  const headers = { 'Content-Type': 'application/json' };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+const LANGUAGES = [
+  'English', 'Hindi', 'Marathi', 'Spanish', 'French', 'Japanese',
+  'Mandarin Chinese', 'Arabic', 'German', 'Portuguese', 'Bengali',
+  'Russian', 'Urdu', 'Indonesian', 'Korean', 'Italian', 'Turkish',
+  'Tamil', 'Telugu', 'Vietnamese', 'Polish', 'Dutch', 'Greek',
+  'Hebrew', 'Thai', 'Swedish', 'Czech', 'Hungarian', 'Romanian',
+  'Danish', 'Finnish', 'Norwegian', 'Swahili', 'Malay', 'Ukrainian',
+];
 
-  const response = await fetch(`${API}/api/${endpoint}`, {
-    ...options,
-    headers: { ...headers, ...(options.headers || {}) },
-  });
-  if (!response.ok) {
-    const err = await response.json().catch(() => ({ error: 'Unable to connect to server' }));
-    throw new Error(err.error || 'Request failed');
+const COUNTRY_CODES = [
+  'AF', 'AL', 'DZ', 'AD', 'AO', 'AG', 'AR', 'AM', 'AU', 'AT', 'AZ', 'BS', 'BH', 'BD', 'BB', 'BY', 'BE',
+  'BZ', 'BJ', 'BT', 'BO', 'BA', 'BW', 'BR', 'BN', 'BG', 'BF', 'BI', 'CV', 'KH', 'CM', 'CA', 'CF', 'TD',
+  'CL', 'CN', 'CO', 'KM', 'CG', 'CD', 'CR', 'CI', 'HR', 'CU', 'CY', 'CZ', 'DK', 'DJ', 'DM', 'DO', 'EC',
+  'EG', 'SV', 'GQ', 'ER', 'EE', 'SZ', 'ET', 'FJ', 'FI', 'FR', 'GA', 'GM', 'GE', 'DE', 'GH', 'GR', 'GD',
+  'GT', 'GN', 'GW', 'GY', 'HT', 'HN', 'HU', 'IS', 'IN', 'ID', 'IR', 'IQ', 'IE', 'IL', 'IT', 'JM', 'JP',
+  'JO', 'KZ', 'KE', 'KI', 'KP', 'KR', 'KW', 'KG', 'LA', 'LV', 'LB', 'LS', 'LR', 'LY', 'LI', 'LT', 'LU',
+  'MG', 'MW', 'MY', 'MV', 'ML', 'MT', 'MH', 'MR', 'MU', 'MX', 'FM', 'MD', 'MC', 'MN', 'ME', 'MA', 'MZ',
+  'MM', 'NA', 'NR', 'NP', 'NL', 'NZ', 'NI', 'NE', 'NG', 'MK', 'NO', 'OM', 'PK', 'PW', 'PA', 'PG', 'PY',
+  'PE', 'PH', 'PL', 'PT', 'QA', 'RO', 'RU', 'RW', 'KN', 'LC', 'VC', 'WS', 'SM', 'ST', 'SA', 'SN', 'RS',
+  'SC', 'SL', 'SG', 'SK', 'SI', 'SB', 'SO', 'ZA', 'SS', 'ES', 'LK', 'SD', 'SR', 'SE', 'CH', 'SY', 'TW',
+  'TJ', 'TZ', 'TH', 'TL', 'TG', 'TO', 'TT', 'TN', 'TR', 'TM', 'TV', 'UG', 'UA', 'AE', 'GB', 'US', 'UY',
+  'UZ', 'VU', 'VA', 'VE', 'VN', 'YE', 'ZM', 'ZW',
+];
+
+const COUNTRY_OPTIONS = (() => {
+  try {
+    const displayNames = new Intl.DisplayNames(['en'], { type: 'region' });
+    return COUNTRY_CODES.map((code) => ({ code, name: displayNames.of(code) || code }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  } catch {
+    return COUNTRY_CODES.map((code) => ({ code, name: code }));
   }
-  return response.json();
+})();
+
+async function request(endpoint, options = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {}),
+  };
+  if (activeAuthToken) {
+    headers['Authorization'] = `Bearer ${activeAuthToken}`;
+  }
+
+  let response;
+  try {
+    response = await fetch(`${API}/api/${endpoint}`, {
+      ...options,
+      headers,
+    });
+  } catch (netErr) {
+    const error = new Error(`Cannot connect to backend server at ${API}. Please ensure the backend is running.`);
+    error.isNetworkError = true;
+    error.originalError = netErr;
+    throw error;
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  let data = null;
+  try {
+    if (contentType.includes('application/json')) {
+      data = await response.json();
+    } else {
+      const text = await response.text();
+      data = { error: text || `HTTP ${response.status} ${response.statusText}` };
+    }
+  } catch (jsonErr) {
+    data = { error: 'Invalid response from server' };
+  }
+
+  // Handle session revocation or expiry from server
+  if (response.status === 401 && activeAuthToken && endpoint !== 'login' && endpoint !== 'register') {
+    await clearSession();
+  }
+
+  if (!response.ok) {
+    const message = data?.error || data?.message || `Server responded with status ${response.status}`;
+    const err = new Error(message);
+    err.status = response.status;
+    err.data = data;
+    throw err;
+  }
+  return data;
 }
 
 const Txt = ({ children, size = 14, color = navy, bold = false, style = {} }) => (
   <Text style={{ fontSize: size, color, fontWeight: bold ? '700' : '400', ...style }}>{children}</Text>
 );
 
-const Btn = ({ label, onPress, outline = false, style = {} }) => (
+const Btn = ({ label, onPress, outline = false, disabled = false, loading = false, style = {} }) => (
   <TouchableOpacity
     onPress={onPress}
     activeOpacity={0.85}
+    disabled={disabled || loading}
     style={{
       backgroundColor: outline ? '#fff' : orange,
       borderWidth: outline ? 1.5 : 0,
@@ -78,241 +299,1105 @@ const Btn = ({ label, onPress, outline = false, style = {} }) => (
       borderRadius: 26,
       alignItems: 'center',
       justifyContent: 'center',
+      opacity: disabled ? 0.65 : 1,
       ...style,
     }}
   >
-    <Txt color={outline ? orange : '#fff'} bold size={15}>{label}</Txt>
+    {loading ? (
+      <ActivityIndicator size="small" color={outline ? orange : '#fff'} />
+    ) : (
+      <Txt color={outline ? orange : '#fff'} bold size={15}>{label}</Txt>
+    )}
   </TouchableOpacity>
 );
 
-const Header = ({ title, subtitle, onBack }) => (
-  <View style={{ paddingHorizontal: 22, paddingTop: 14, paddingBottom: 14 }}>
-    {onBack && (
-      <TouchableOpacity onPress={onBack} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
-        <Ionicons name="arrow-back" size={20} color={navy} />
-        <Txt size={14} color={muted} style={{ marginLeft: 6 }}>Back</Txt>
-      </TouchableOpacity>
-    )}
-    <Txt size={24} bold>{title}</Txt>
-    {subtitle && <Txt color={muted} size={13} style={{ marginTop: 4 }}>{subtitle}</Txt>}
-  </View>
-);
+function SearchSelect({ label, value, options, onSelect, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const filtered = options.filter((option) => {
+    const name = typeof option === 'string' ? option : option.name;
+    return name.toLowerCase().includes(query.trim().toLowerCase());
+  });
 
-const Field = ({ label, value, setValue, placeholder, secureTextEntry = false }) => (
-  <View style={{ marginBottom: 16 }}>
-    <Txt size={13} bold style={{ marginBottom: 6 }}>{label}</Txt>
-    <TextInput
-      value={value}
-      onChangeText={setValue}
-      placeholder={placeholder}
-      placeholderTextColor="#9CA3AF"
-      secureTextEntry={secureTextEntry}
-      style={{
-        backgroundColor: light,
-        borderRadius: 14,
-        padding: 14,
-        fontSize: 15,
-        borderColor: border,
-        borderWidth: 1,
-        color: navy,
-      }}
-    />
+  return (
+    <View style={{ marginBottom: 15, zIndex: open ? 2 : 1 }}>
+      <Txt size={13} bold style={{ marginBottom: 8 }}>{label}</Txt>
+      <TouchableOpacity
+        accessibilityRole="button"
+        accessibilityLabel={`${label} selector`}
+        onPress={() => {
+          setOpen((current) => !current);
+          setQuery('');
+        }}
+        style={{
+          backgroundColor: '#fff',
+          borderColor: open ? orange : border,
+          borderWidth: 1,
+          borderRadius: 14,
+          padding: 15,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}
+      >
+        <Txt color={value ? navy : '#9CA3AF'} size={15}>{value || placeholder}</Txt>
+        <Ionicons name={open ? 'chevron-up' : 'chevron-down'} size={18} color={muted} />
+      </TouchableOpacity>
+      {open && (
+        <View style={{ backgroundColor: '#fff', borderColor: border, borderWidth: 1, borderRadius: 14, marginTop: 6, overflow: 'hidden' }}>
+          <TextInput
+            autoFocus
+            value={query}
+            onChangeText={setQuery}
+            placeholder={`Search ${label.toLowerCase()}...`}
+            placeholderTextColor="#9CA3AF"
+            style={{ padding: 12, borderBottomWidth: 1, borderBottomColor: border, color: navy }}
+          />
+          <ScrollView nestedScrollEnabled style={{ maxHeight: 190 }}>
+            {filtered.map((option) => {
+              const optionName = typeof option === 'string' ? option : option.name;
+              return (
+                <TouchableOpacity
+                  key={typeof option === 'string' ? option : option.code}
+                  onPress={() => {
+                    onSelect(optionName);
+                    setOpen(false);
+                    setQuery('');
+                  }}
+                  style={{ paddingHorizontal: 14, paddingVertical: 11, backgroundColor: optionName === value ? '#FFF0E8' : '#fff' }}
+                >
+                  <Txt color={optionName === value ? orange : navy} bold={optionName === value}>{optionName}</Txt>
+                </TouchableOpacity>
+              );
+            })}
+            {!filtered.length && <Txt color={muted} size={13} style={{ padding: 14 }}>No matching options.</Txt>}
+          </ScrollView>
+        </View>
+      )}
+    </View>
+  );
+}
+
+const Section = ({ title, children }) => (
+  <View style={{ marginBottom: 22 }}>
+    <Txt size={16} bold style={{ marginBottom: 12 }}>{title}</Txt>
+    {children}
   </View>
 );
 
 function App() {
+  const { height: viewportHeight } = useWindowDimensions();
+  const isShortViewport = viewportHeight < 560;
+  const welcomeIllustrationHeight = Math.max(110, Math.min(180, viewportHeight * 0.34));
   const [screen, setScreen] = useState('welcome');
-  const [authToken, setAuthToken] = useState(null);
-
-  // Authenticated user state
-  const [currentUser, setCurrentUser] = useState({
-    id: 'u1',
-    name: 'Vedant Kengale',
-    alias: 'VedantK',
-    email: 'vedant@bytalk.app',
-    country: 'India',
-    nativeLanguage: 'Hindi',
-    learningLanguage: 'English',
-    level: 'Intermediate',
-    streak: 12,
-    minutes: 150,
-    words: 28,
-    referralCode: 'BYTALK-VEDANT',
-    referredCount: 3,
-    savedPhrases: ['phr_work_1', 'phr_int_1'],
-    blockedUsers: []
-  });
-
-  // Form states
-  const [name, setName] = useState(currentUser.name);
-  const [alias, setAlias] = useState(currentUser.alias || 'VedantK');
-  const [country, setCountry] = useState(currentUser.country);
-  const [nativeLanguage, setNativeLanguage] = useState(currentUser.nativeLanguage);
-  const [learningLanguage, setLearningLanguage] = useState(currentUser.learningLanguage);
-  const [level, setLevel] = useState(currentUser.level);
-  const [goals, setGoals] = useState('Daily Conversation');
-
-  // Sign in / Sign up states
-  const [signInEmail, setSignInEmail] = useState('');
-  const [signInPassword, setSignInPassword] = useState('');
-  const [signUpName, setSignUpName] = useState('');
-  const [signUpEmail, setSignUpEmail] = useState('');
-  const [signUpPassword, setSignUpPassword] = useState('');
-  const [signUpConfirm, setSignUpConfirm] = useState('');
-
-  // Collections & state
-  const [partners, setPartners] = useState(fallbackPartners);
+  const [sessionChecking, setSessionChecking] = useState(true);
+  const [userId, setUserId] = useState(null);
+  const [name, setName] = useState('');
+  const [country, setCountry] = useState('');
+  const [nativeLanguage, setNativeLanguage] = useState('');
+  const [learningLanguage, setLearningLanguage] = useState('English');
+  const [level, setLevel] = useState('Beginner');
+  const [partners, setPartners] = useState([]);
+  const [discoverLoading, setDiscoverLoading] = useState(false);
+  const [discoverRefreshing, setDiscoverRefreshing] = useState(false);
+  const [discoverError, setDiscoverError] = useState('');
   const [rooms, setRooms] = useState(fallbackRooms);
+  const [activeRoom, setActiveRoom] = useState(null);
+  const [roomParticipants, setRoomParticipants] = useState([]);
+  const [roomStatus, setRoomStatus] = useState('idle');
+  const [roomError, setRoomError] = useState('');
+  const [roomMuted, setRoomMuted] = useState(false);
   const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState(fallbackPartners[0]);
+  const [selected, setSelected] = useState({ id: null, name: 'BYTALK' });
   const [messages, setMessages] = useState([]);
+  const [unreadByUser, setUnreadByUser] = useState({});
+  const [conversations, setConversations] = useState([]);
+  const [messageBanner, setMessageBanner] = useState(null);
   const [draft, setDraft] = useState('');
   const [filter, setFilter] = useState('All');
   const [vocab, setVocab] = useState([]);
+  const [word, setWord] = useState('');
   const [backendUp, setBackendUp] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const [messageLoading, setMessageLoading] = useState(false);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [chatError, setChatError] = useState('');
+  const [typing, setTyping] = useState(false);
+  const [call, setCall] = useState(null);
+  const [callHistory, setCallHistory] = useState([]);
+  const [callHistoryError, setCallHistoryError] = useState('');
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const [callDuration, setCallDuration] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const [cameraEnabled, setCameraEnabled] = useState(true);
+  const [speakerEnabled, setSpeakerEnabled] = useState(false);
+  const [callNotice, setCallNotice] = useState('');
+  const [callStarting, setCallStarting] = useState(null);
+  const socketRef = useRef(null);
+  const liveRoomRef = useRef(null);
+  const activeRoomRef = useRef(null);
+  const peerRef = useRef(null);
+  const callRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const iceServersRef = useRef([]);
+  const pendingIceRef = useRef([]);
+  const pendingOutgoingIceRef = useRef([]);
+  const signalQueueRef = useRef(Promise.resolve());
+  const selectedRef = useRef(selected);
+  const userIdRef = useRef(userId);
+  const screenRef = useRef(screen);
+  const typingTimerRef = useRef(null);
+  const callExitTimerRef = useRef(null);
+  const partnersRef = useRef(partners);
+  const discoverRequestRef = useRef(0);
+  const seenMessageIdsRef = useRef(new Set());
+  selectedRef.current = selected;
+  userIdRef.current = userId;
+  screenRef.current = screen;
+  callRef.current = call;
+  partnersRef.current = partners;
+  activeRoomRef.current = activeRoom;
 
-  // Modals
-  const [showSafetyModal, setShowSafetyModal] = useState(false);
-  const [showCreateRoomModal, setShowCreateRoomModal] = useState(false);
-  const [newRoomName, setNewRoomName] = useState('');
-  const [newRoomTopic, setNewRoomTopic] = useState('Daily English');
-  const [newRoomCapacity, setNewRoomCapacity] = useState('50');
+  // Auth form states
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [loginError, setLoginError] = useState('');
 
-  const [showReferralModal, setShowReferralModal] = useState(false);
-  const [inputReferralCode, setInputReferralCode] = useState('');
+  const [regName, setRegName] = useState('');
+  const [regEmail, setRegEmail] = useState('');
+  const [regPassword, setRegPassword] = useState('');
+  const [regConfirmPassword, setRegConfirmPassword] = useState('');
+  const [showRegPassword, setShowRegPassword] = useState(false);
+  const [showRegConfirmPassword, setShowRegConfirmPassword] = useState(false);
+  const [regError, setRegError] = useState('');
+
+  const [authBusy, setAuthBusy] = useState(false);
+  const [focusedField, setFocusedField] = useState('');
+
+  // Reliable Health Check (/api/health)
+  const checkHealth = async () => {
+    try {
+      const res = await request('health');
+      if (res && res.ok) {
+        setBackendUp(true);
+        return true;
+      }
+      setBackendUp(false);
+      return false;
+    } catch (e) {
+      setBackendUp(false);
+      return false;
+    }
+  };
 
   const refresh = async () => {
     try {
-      const [p, r, v] = await Promise.all([
-        request('partners'),
-        request('rooms'),
-        request(`vocabulary/${currentUser.id}`).catch(() => [])
-      ]);
-      setPartners(p.length > 0 ? p : fallbackPartners);
-      setRooms(r.length > 0 ? r : fallbackRooms);
-      setVocab(v);
-      setBackendUp(true);
+      const isUp = await checkHealth();
+      if (isUp) {
+        const [r, v] = await Promise.all([
+          request('rooms'),
+          activeAuthToken ? request(`vocabulary/${userId}`).catch(() => []) : Promise.resolve([]),
+        ]);
+        console.log('[BYTALK room] API state', {
+          roomCount: Array.isArray(r) ? r.length : 0,
+          mediaAvailable: Array.isArray(r) ? r.filter((room) => room.mediaAvailable).length : 0,
+        });
+        setRooms(r);
+        setVocab(v);
+        if (activeAuthToken) await loadDiscoverUsers(true);
+      }
     } catch {
       setBackendUp(false);
     }
   };
 
-  useEffect(() => {
-    refresh();
-    const socket = io(API, { transports: ['websocket', 'polling'] });
-    socket.emit('user:online', { userId: currentUser.id });
-
-    socket.on('message:new', (m) => {
-      setMessages((prev) => (prev.some((x) => x.id === m.id) ? prev : [...prev, m]));
-    });
-
-    socket.on('rooms:changed', (updatedRooms) => {
-      setRooms(updatedRooms);
-    });
-
-    return () => socket.disconnect();
-  }, [currentUser.id]);
-
-  useEffect(() => {
-    if (screen === 'chat' && selected) {
-      request(`messages/${currentUser.id}/${selected.id}`)
-        .then(setMessages)
-        .catch(() => setMessages([]));
-    }
-  }, [selected, screen, currentUser.id]);
-
-  // Handle Sign In (Section 5)
-  const handleSignIn = async () => {
-    if (!signInEmail.trim() || !signInPassword.trim()) {
-      Alert.alert('Missing fields', 'Please enter your email and password.');
+  async function loadDiscoverUsers(refreshing = false) {
+    const requestId = ++discoverRequestRef.current;
+    if (!activeAuthToken) {
+      setPartners([]);
+      setDiscoverError('Sign in to discover registered BYTALK users.');
+      setDiscoverLoading(false);
+      setDiscoverRefreshing(false);
       return;
     }
-    setBusy(true);
+
+    if (refreshing) setDiscoverRefreshing(true);
+    else if (!partnersRef.current.length) setDiscoverLoading(true);
+    setDiscoverError('');
     try {
-      const res = await request('auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ identifier: signInEmail, password: signInPassword }),
+      const users = await request('users/discover');
+      if (requestId !== discoverRequestRef.current) return;
+      setPartners(Array.isArray(users) ? users : []);
+      setDiscoverError('');
+    } catch (error) {
+      if (requestId !== discoverRequestRef.current) return;
+      setDiscoverError(error.message || 'Could not load registered users. Check your connection and retry.');
+      if (error.status === 401) {
+        setPartners([]);
+        setSessionVersion((value) => value + 1);
+        setScreen('welcome');
+      }
+    } finally {
+      if (requestId === discoverRequestRef.current) {
+        setDiscoverLoading(false);
+        setDiscoverRefreshing(false);
+      }
+    }
+  }
+
+  function updateCall(next) {
+    setCall((previous) => {
+      const value = typeof next === 'function' ? next(previous) : next;
+      callRef.current = value;
+      return value;
+    });
+  }
+
+  function releaseCallMedia() {
+    const connection = peerRef.current?.connection;
+    if (connection) {
+      connection.onicecandidate = null;
+      connection.ontrack = null;
+      connection.onconnectionstatechange = null;
+      connection.oniceconnectionstatechange = null;
+      connection.close();
+    }
+
+    peerRef.current = null;
+    pendingIceRef.current = [];
+    pendingOutgoingIceRef.current = [];
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    localStreamRef.current = null;
+    setLocalStream(null);
+    setRemoteStream(null);
+    stopAudioRoute();
+    setMuted(false);
+    setCameraEnabled(true);
+    setSpeakerEnabled(false);
+  }
+
+  function updateRoomList(roomId, participants) {
+    if (!roomId) return;
+    setRooms((previous) => previous.map((room) => room.id === roomId
+      ? { ...room, participants: participants.length, mediaAvailable: room.mediaAvailable }
+      : room));
+    if (activeRoomRef.current?.id === roomId) setRoomParticipants(participants);
+  }
+
+  async function notifyIncomingMessage(message) {
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || !('Notification' in window)) return;
+    try {
+      if (Notification.permission === 'granted' && document.hidden) {
+        new Notification('New BYTALK message', { body: String(message.text || '').slice(0, 120) });
+      }
+    } catch (error) {
+      console.warn('[BYTALK notification] unavailable', error?.message || 'permission denied');
+    }
+  }
+
+  function refreshConversations() {
+    return request('messages/conversations')
+      .then(setConversations)
+      .catch((error) => console.warn('[BYTALK message] conversation list failed', error.message));
+  }
+
+  function conversationForMessage(message) {
+    const partner = partnersRef.current.find((item) => item.id === message.from);
+    return {
+      id: message.from,
+      name: partner?.name || partner?.displayName || 'BYTALK user',
+      displayName: partner?.displayName || partner?.name || 'BYTALK user',
+      avatarUrl: partner?.avatarUrl || null,
+      country: partner?.country || '',
+      learningLanguage: partner?.learningLanguage || '',
+      online: Boolean(partner?.online),
+    };
+  }
+
+  function openConversation(partner) {
+    setSelected(partner);
+    setChatError('');
+    setMessageBanner(null);
+    setScreen('chat');
+  }
+
+  async function requestNotificationPermission() {
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || !('Notification' in window)) return;
+    if (Notification.permission !== 'default') return;
+    try {
+      await Notification.requestPermission();
+    } catch (error) {
+      console.warn('[BYTALK notification] permission request unavailable', error?.message || 'permission denied');
+    }
+  }
+
+  async function notifyIncomingCall(incoming) {
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || !('Notification' in window)) return;
+    try {
+      if (Notification.permission === 'default') await Notification.requestPermission();
+      if (Notification.permission === 'granted' && document.hidden) {
+        new Notification(`Incoming ${incoming.type} call`, {
+          body: `${incoming.caller?.name || 'A BYTALK user'} is calling you.`,
+        });
+      }
+    } catch (error) {
+      console.warn('[BYTALK notification] incoming call unavailable', error?.message || 'permission denied');
+    }
+  }
+
+  function createCallPeer(callId, stream, iceServers) {
+    const connection = createPeerConnection(iceServers);
+    console.log('[BYTALK call] peer created', {
+      callId,
+      iceServerCount: iceServers.length,
+      audioTracks: stream.getAudioTracks().length,
+      videoTracks: stream.getVideoTracks().length,
+    });
+    stream.getTracks().forEach((track) => connection.addTrack(track, stream));
+    peerRef.current = { callId, connection };
+    connection.onicecandidate = (event) => {
+      if (!event.candidate) return;
+      const candidate = event.candidate.toJSON ? event.candidate.toJSON() : event.candidate;
+      const callIdForCandidate = peerRef.current?.callId;
+      if (!callIdForCandidate) {
+        pendingOutgoingIceRef.current.push(candidate);
+        return;
+      }
+      console.log('[BYTALK call] signaling ICE candidate', { callId: callIdForCandidate });
+      socketRef.current?.emit('call:signal', {
+        callId: callIdForCandidate,
+        kind: 'ice',
+        signal: candidate,
+      }, (response) => {
+        if (response?.error) {
+          console.warn('[BYTALK call] ICE candidate rejected', response.error);
+        }
       });
-      if (res.token && res.user) {
-        setAuthToken(res.token);
-        setCurrentUser(res.user);
-        setName(res.user.name || '');
-        setAlias(res.user.alias || res.user.name?.split(' ')[0] || '');
-        setCountry(res.user.country || 'India');
-        setNativeLanguage(res.user.nativeLanguage || 'Hindi');
-        setLearningLanguage(res.user.learningLanguage || 'English');
-        setLevel(res.user.level || 'Intermediate');
-        if (res.user.goals) setGoals(res.user.goals);
+    };
+    connection.ontrack = (event) => {
+      console.log('[BYTALK call] remote track received', { callId: peerRef.current?.callId, kind: event.track?.kind });
+      if (event.streams?.[0]) setRemoteStream(event.streams[0]);
+    };
+    const updateConnectionState = () => {
+      const state = connection.connectionState;
+      const iceState = connection.iceConnectionState;
+      console.log('[BYTALK call] peer state', { callId: peerRef.current?.callId, state, iceState });
+      const mediaConnected = state === 'connected'
+        || ((iceState === 'connected' || iceState === 'completed') && !['failed', 'closed'].includes(state));
+      if (mediaConnected) {
+        updateCall((previous) => previous ? { ...previous, status: 'Connected', connectedAt: previous.connectedAt || new Date().toISOString() } : previous);
+        socketRef.current?.emit('call:connected', { callId: peerRef.current?.callId });
+      } else if (state === 'disconnected' || iceState === 'disconnected') {
+        updateCall((previous) => previous ? { ...previous, status: 'Reconnecting' } : previous);
+      } else if (state === 'failed' || iceState === 'failed') {
+        const notice = 'The media connection failed. Check your network or TURN server configuration.';
+        setCallNotice(notice);
+        endCall(notice);
+      } else if (state === 'connecting' || iceState === 'checking') {
+        updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
+      }
+    };
+    connection.onconnectionstatechange = updateConnectionState;
+    connection.oniceconnectionstatechange = updateConnectionState;
+    return connection;
+  }
+
+  async function createCallOffer(callId) {
+    try {
+      const connection = peerRef.current?.connection;
+      if (!connection || peerRef.current.callId !== callId) return;
+      const offer = await connection.createOffer();
+      await connection.setLocalDescription(offer);
+      console.log('[BYTALK call] signaling offer', { callId });
+      socketRef.current?.emit('call:signal', { callId, kind: 'offer', signal: connection.localDescription || offer });
+      updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
+    } catch (error) {
+      setCallNotice(error.message || 'Could not start the media connection.');
+    }
+  }
+
+  async function processCallSignal({ callId, kind, signal }) {
+    const connection = peerRef.current?.connection;
+    if (!connection || peerRef.current.callId !== callId) return;
+    console.log('[BYTALK call] signaling received', { callId, kind });
+    try {
+      if (kind === 'offer') {
+        await connection.setRemoteDescription(makeSessionDescription(signal));
+        for (const candidate of pendingIceRef.current.splice(0)) {
+          await connection.addIceCandidate(makeIceCandidate(candidate));
+        }
+        const answer = await connection.createAnswer();
+        await connection.setLocalDescription(answer);
+        console.log('[BYTALK call] signaling answer', { callId });
+        socketRef.current?.emit('call:signal', { callId, kind: 'answer', signal: connection.localDescription || answer });
+        updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
+      } else if (kind === 'answer') {
+        await connection.setRemoteDescription(makeSessionDescription(signal));
+        for (const candidate of pendingIceRef.current.splice(0)) {
+          await connection.addIceCandidate(makeIceCandidate(candidate));
+        }
+      } else if (kind === 'ice') {
+        if (connection.remoteDescription) {
+          await connection.addIceCandidate(makeIceCandidate(signal));
+        } else {
+          pendingIceRef.current.push(signal);
+        }
+      }
+    } catch (error) {
+      setCallNotice(error.message || 'Could not negotiate the media connection.');
+    }
+  }
+
+  function handleCallSignal(signal) {
+    signalQueueRef.current = signalQueueRef.current
+      .catch(() => {})
+      .then(() => processCallSignal(signal));
+  }
+
+  function finishCallLocally(status, notice = '') {
+    if (callExitTimerRef.current) clearTimeout(callExitTimerRef.current);
+    setCallNotice(notice);
+    releaseCallMedia();
+    updateCall((previous) => previous ? { ...previous, status } : previous);
+    request('calls').then(setCallHistory).catch((error) => {
+      setCallHistoryError(error.message || 'Call ended, but call history could not be refreshed.');
+    });
+    callExitTimerRef.current = setTimeout(() => {
+      updateCall(null);
+      setScreen('discover');
+    }, 1800);
+  }
+
+  function emitWithAck(event, payload) {
+    return new Promise((resolve, reject) => {
+      const socket = socketRef.current;
+      if (!socket?.connected) {
+        reject(new Error('Real-time service is disconnected. Reconnect and try again.'));
+        return;
+      }
+      socket.timeout(12000).emit(event, payload, (timeoutError, response) => {
+        if (timeoutError) {
+          reject(new Error('The server did not respond. Please try again.'));
+        } else if (response?.error) {
+          reject(new Error(response.error));
+        } else {
+          resolve(response || {});
+        }
+      });
+    });
+  }
+
+  async function startCall(partner, type) {
+    console.log('[BYTALK call] button pressed', { partnerId: partner?.id, type });
+    if (!activeAuthToken) {
+      Alert.alert('Sign in required', 'Sign in before starting a private call.');
+      return;
+    }
+    if (!socketRef.current?.connected) {
+      Alert.alert('Call unavailable', 'The real-time service is disconnected. Please reconnect and try again.');
+      return;
+    }
+    setCallStarting({ partnerId: partner.id, type });
+    setCallNotice('Requesting microphone and camera permission…');
+    try {
+      console.log('[BYTALK call] requesting media', { type });
+      const rtcConfig = await request('rtc-config');
+      iceServersRef.current = rtcConfig.iceServers || [];
+      const stream = await getLocalMediaStream(type);
+      console.log('[BYTALK call] media ready', {
+        audio: stream.getAudioTracks().length,
+        video: stream.getVideoTracks().length,
+      });
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      const initialCall = { id: null, peer: partner, type, direction: 'outgoing', status: 'Calling' };
+      updateCall(initialCall);
+      setCallNotice(type === 'video' && !stream.getVideoTracks().length
+        ? 'Camera unavailable; this call will continue with audio only.'
+        : '');
+      setCameraEnabled(stream.getVideoTracks().length > 0);
+      setSelected(partner);
+      setScreen('call');
+      const speaker = type === 'video';
+      startAudioRoute(type, speaker);
+      setSpeakerEnabled(speaker);
+      createCallPeer(null, stream, iceServersRef.current);
+      console.log('[BYTALK call] sending call:invite', { to: partner.id, type });
+      const result = await emitWithAck('call:invite', { to: partner.id, type });
+      console.log('[BYTALK call] invite acknowledged', { callId: result.callId });
+      if (!peerRef.current || callRef.current?.peer.id !== partner.id || callRef.current?.status === 'Ended') {
+        socketRef.current?.emit('call:end', { callId: result.callId });
+        return;
+      }
+      peerRef.current.callId = result.callId;
+      const queuedCandidates = pendingOutgoingIceRef.current.splice(0);
+      for (const candidate of queuedCandidates) {
+        socketRef.current?.emit('call:signal', {
+          callId: result.callId,
+          kind: 'ice',
+          signal: candidate,
+        }, (response) => {
+          if (response?.error) {
+            console.warn('[BYTALK call] queued ICE candidate rejected', response.error);
+          }
+        });
+      }
+      updateCall((previous) => previous ? { ...previous, id: result.callId, status: 'Ringing' } : previous);
+    } catch (error) {
+      console.warn('[BYTALK call] failed', error.message || error);
+      releaseCallMedia();
+      updateCall(null);
+      setScreen('discover');
+      Alert.alert('Could not start call', error.message || 'Check your connection and permissions.');
+    } finally {
+      setCallStarting(null);
+    }
+  }
+
+  async function acceptCall() {
+    const incoming = callRef.current;
+    if (!incoming?.id || incoming.direction !== 'incoming') return;
+    try {
+      const rtcConfig = await request('rtc-config');
+      iceServersRef.current = rtcConfig.iceServers || [];
+      const stream = await getLocalMediaStream(incoming.type);
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      setCameraEnabled(stream.getVideoTracks().length > 0);
+      if (incoming.type === 'video' && !stream.getVideoTracks().length) {
+        setCallNotice('Camera unavailable; accepting with audio only.');
+      }
+      const speaker = incoming.type === 'video';
+      startAudioRoute(incoming.type, speaker);
+      setSpeakerEnabled(speaker);
+      createCallPeer(incoming.id, stream, iceServersRef.current);
+      await emitWithAck('call:accept', { callId: incoming.id });
+      updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
+    } catch (error) {
+      releaseCallMedia();
+      socketRef.current?.emit('call:reject', { callId: incoming.id });
+      finishCallLocally('Ended', error.message || 'Could not accept this call.');
+    }
+  }
+
+  async function rejectCall() {
+    const incoming = callRef.current;
+    if (!incoming?.id) return;
+    let notice = '';
+    try {
+      await emitWithAck('call:reject', { callId: incoming.id });
+    } catch (error) {
+      notice = error.message;
+    }
+    finishCallLocally('Ended', notice);
+  }
+
+  async function endCall(notice = '') {
+    const currentCall = callRef.current;
+    if (!currentCall) return;
+    if (currentCall.id) {
+      try {
+        await emitWithAck('call:end', { callId: currentCall.id });
+      } catch (error) {
+        notice = notice ? `${notice} ${error.message}` : error.message;
+      }
+    }
+    finishCallLocally('Ended', notice);
+  }
+
+  // RESTORE SESSION ON APP OPEN (Requirement 7 & 11)
+  useEffect(() => {
+    let active = true;
+
+    async function restoreSession() {
+      try {
+        const [token, expiryStr, savedUserStr] = await Promise.all([
+          authStorage.getItem(SESSION_TOKEN_KEY),
+          authStorage.getItem(SESSION_EXPIRES_KEY),
+          authStorage.getItem(SESSION_USER_KEY),
+        ]);
+
+        const expiry = Number(expiryStr);
+        // Fast client check: if no token or local 15-day expiry passed, clear session
+        if (!token || !Number.isFinite(expiry) || Date.now() >= expiry) {
+          await clearSession();
+          if (active) {
+            setScreen('welcome');
+            setSessionChecking(false);
+          }
+          return;
+        }
+
+        // Set token in memory to validate against backend
+        setAuthToken(token);
+
+        // Validate token cryptographically against backend (Requirement 11)
+        const meRes = await request('auth/me');
+        if (!active) return;
+
+        if (meRes && meRes.ok && meRes.user) {
+          if (meRes.user.id) setUserId(meRes.user.id);
+          if (meRes.user.name) setName(meRes.user.name);
+          if (meRes.user.country) setCountry(meRes.user.country);
+          if (meRes.user.nativeLanguage) setNativeLanguage(meRes.user.nativeLanguage);
+          if (meRes.user.learningLanguage) setLearningLanguage(meRes.user.learningLanguage);
+          if (meRes.user.level) setLevel(meRes.user.level);
+          await authStorage.setItem(SESSION_USER_KEY, JSON.stringify(meRes.user));
+          setScreen('discover');
+        } else {
+          await clearSession();
+          setScreen('welcome');
+        }
+      } catch (err) {
+        // Backend validation failed (expired, revoked, or server unavailable)
+        if (active) {
+          await clearSession();
+          setScreen('welcome');
+        }
+      } finally {
+        if (active) setSessionChecking(false);
+      }
+    }
+
+    restoreSession();
+    refresh();
+
+    return () => {
+      active = false;
+      socketRef.current?.emit('typing:stop', { to: selected.id });
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (sessionChecking) return undefined;
+    let active = true;
+    let socket;
+
+    async function connectSocket() {
+      const token = activeAuthToken || await authStorage.getItem(SESSION_TOKEN_KEY);
+      if (!active || !token) return;
+      socket = io(API, { auth: { token }, transports: ['websocket', 'polling'], autoConnect: false });
+      socketRef.current = socket;
+      socket.on('connect', () => {
+        console.log('[BYTALK socket] connected', { api: API });
+        loadDiscoverUsers();
+        request('messages/unread')
+          .then(setUnreadByUser)
+          .catch((error) => console.warn('[BYTALK message] unread count failed', error.message));
+        refreshConversations();
+        if (screenRef.current === 'chat' && selectedRef.current.id && userIdRef.current) {
+          request(`messages/${userIdRef.current}/${selectedRef.current.id}?limit=100`)
+            .then((history) => {
+              setMessages((previous) => {
+                const merged = new Map(previous.map((message) => [message.id, message]));
+                history.forEach((message) => merged.set(message.id, message));
+                return [...merged.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+              });
+            })
+            .catch((error) => console.warn('[BYTALK message] reconnect history refresh failed', error.message));
+        }
+        const connection = peerRef.current?.connection;
+        if (callRef.current?.id && connection?.connectionState === 'connected') {
+          socket.emit('call:connected', { callId: callRef.current.id });
+        }
+      });
+      socket.on('connect_error', (error) => {
+        console.warn('[BYTALK socket] connection error', error.message);
+        if (active) setChatError(error.message || 'Could not connect to messaging.');
+        if (active) setCallNotice(`Call service unavailable: ${error.message || 'connection failed'}`);
+      });
+      socket.on('disconnect', (reason) => {
+        console.warn('[BYTALK socket] disconnected', { reason });
+        if (activeRoomRef.current) {
+          liveRoomRef.current?.disconnect();
+          liveRoomRef.current = null;
+          setActiveRoom(null);
+          setRoomParticipants([]);
+          setRoomStatus('error');
+          setRoomError(`Live room disconnected: ${reason}`);
+        }
+      });
+      socket.on('error', (error) => {
+        console.warn('[BYTALK socket] error', error?.message || 'unknown error');
+      });
+      socket.on('message:new', (message) => {
+        try {
+          const currentUserId = userIdRef.current;
+          const recipientId = String(message.to || '');
+          const senderId = String(message.from || '');
+          if (recipientId !== String(currentUserId || '') || senderId === String(currentUserId || '')) return;
+          if (seenMessageIdsRef.current.has(message.id)) return;
+          seenMessageIdsRef.current.add(message.id);
+          const openConversation = screenRef.current === 'chat' && String(selectedRef.current.id) === senderId;
+          const sender = conversationForMessage(message);
+          console.log('[BYTALK message] received', { messageId: message.id, from: senderId, to: recipientId, openConversation });
+          setMessages((previous) => previous.some((item) => item.id === message.id) ? previous : [...previous, message]);
+          setConversations((previous) => [
+            {
+              user: sender,
+              latestMessage: message,
+              unreadCount: openConversation ? 0 : (previous.find((item) => item.user.id === senderId)?.unreadCount || 0) + 1,
+            },
+            ...previous.filter((item) => item.user.id !== senderId),
+          ]);
+          if (!openConversation) {
+            setUnreadByUser((previous) => ({ ...previous, [senderId]: (previous[senderId] || 0) + 1 }));
+            setMessageBanner({ ...message, sender });
+            notifyIncomingMessage(message);
+          } else {
+            request(`messages/${currentUserId}/${senderId}?limit=100`)
+              .catch((error) => console.warn('[BYTALK message] read update failed', error.message));
+            refreshConversations();
+          }
+        } catch (error) {
+          console.warn('[BYTALK message] listener failed', error?.message || 'invalid message event');
+        }
+      });
+      socket.on('message:status', (status) => {
+        setMessages((previous) => previous.map((message) => message.id === status.id ? { ...message, ...status } : message));
+        refreshConversations();
+      });
+      socket.on('rooms:changed', setRooms);
+      socket.on('room:state', ({ roomId, participants }) => {
+        console.log('[BYTALK room] state', { roomId, participantCount: participants?.length || 0 });
+        updateRoomList(roomId, participants || []);
+      });
+      socket.on('room:participant-joined', ({ roomId, participant }) => {
+        console.log('[BYTALK room] participant joined', { roomId, participantId: participant?.id });
+      });
+      socket.on('room:participant-left', ({ roomId, userId: changedUserId }) => {
+        console.log('[BYTALK room] participant left', { roomId, userId: changedUserId });
+      });
+      socket.on('presence:update', ({ userId: changedId, online }) => {
+        console.log('[BYTALK presence] update', { userId: changedId, online });
+        setPartners((previous) => previous.map((partner) => partner.id === changedId ? { ...partner, online } : partner));
+        setSelected((previous) => previous.id === changedId ? { ...previous, online } : previous);
+      });
+      socket.on('presence:state', (onlineUserIds) => {
+        const online = new Set((onlineUserIds || []).map(String));
+        console.log('[BYTALK presence] snapshot', { count: online.size });
+        setPartners((previous) => previous.map((partner) => ({ ...partner, online: online.has(String(partner.id)) })));
+        setSelected((previous) => previous.id ? { ...previous, online: online.has(String(previous.id)) } : previous);
+      });
+      socket.on('typing:update', ({ from, typing: isTyping }) => {
+        if (from === selectedRef.current.id) setTyping(Boolean(isTyping));
+      });
+      socket.on('call:incoming', (incoming) => {
+        console.log('[BYTALK call] incoming call received', { callId: incoming.callId, type: incoming.type });
+        if (callRef.current?.id === incoming.callId) return;
+        const peer = partnersRef.current.find((partner) => partner.id === incoming.caller.id) || incoming.caller;
+        setSelected(peer);
+        updateCall({
+          id: incoming.callId,
+          peer,
+          type: incoming.type,
+          direction: 'incoming',
+          status: 'Ringing',
+        });
+        setCallNotice('');
+        setScreen('call');
+        notifyIncomingCall(incoming);
+      });
+      socket.on('call:accepted', ({ callId }) => {
+        console.log('[BYTALK call] call accepted', { callId, userId });
+        if (callRef.current?.id === callId) createCallOffer(callId);
+      });
+      socket.on('call:signal', (signal) => handleCallSignal(signal));
+      socket.on('call:state', ({ callId, status, connectedAt }) => {
+        if (callRef.current?.id !== callId) return;
+        const connection = peerRef.current?.connection;
+        const locallyConnected = connection?.connectionState === 'connected'
+          || connection?.iceConnectionState === 'connected'
+          || connection?.iceConnectionState === 'completed';
+        console.log('[BYTALK call] server call state', { callId, status, locallyConnected });
+        if (status === 'connected' && !locallyConnected) return;
+        const title = status === 'connected' ? 'Connected' : 'Reconnecting';
+        updateCall((previous) => previous ? { ...previous, status: title, connectedAt: connectedAt || previous.connectedAt } : previous);
+      });
+      socket.on('call:missed', ({ callId }) => {
+        if (callRef.current?.id === callId) finishCallLocally('Missed', 'This call was not answered.');
+      });
+      socket.on('call:rejected', ({ callId }) => {
+        if (callRef.current?.id === callId) finishCallLocally('Ended', 'The call was declined.');
+      });
+      socket.on('call:ended', ({ callId, status, reason }) => {
+        console.log('[BYTALK call] call ended', { callId, status, reason });
+        if (callRef.current?.id !== callId) return;
+        const message = reason === 'disconnected'
+          ? 'The other user disconnected.'
+          : reason === 'connection-timeout'
+            ? 'The media connection could not be established.'
+            : '';
+        finishCallLocally(status === 'missed' ? 'Missed' : 'Ended', message);
+      });
+      socket.connect();
+    }
+
+    connectSocket().catch((error) => {
+      if (active) setChatError(error.message || 'Could not connect to messaging.');
+    });
+    return () => {
+      active = false;
+      liveRoomRef.current?.disconnect();
+      liveRoomRef.current = null;
+      if (socketRef.current === socket) socketRef.current = null;
+      socket?.disconnect();
+    };
+  }, [sessionChecking, sessionVersion, userId]);
+
+  useEffect(() => {
+    if (!sessionChecking && screen === 'discover') loadDiscoverUsers();
+  }, [screen, sessionChecking, sessionVersion, userId]);
+
+  useEffect(() => {
+    if (screen === 'chat') {
+      if (selected.id) {
+        setUnreadByUser((previous) => {
+          if (!previous[selected.id]) return previous;
+          const next = { ...previous };
+          delete next[selected.id];
+          return next;
+        });
+        refreshConversations();
+      }
+      let active = true;
+      setMessageLoading(true);
+      setChatError('');
+      setTyping(false);
+      request(`messages/${userId}/${selected.id}`)
+        .then((history) => {
+          if (active) {
+            setMessages((previous) => {
+              const merged = new Map(previous.map((message) => [message.id, message]));
+              history.forEach((message) => merged.set(message.id, message));
+              return [...merged.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+            });
+            setHasOlderMessages(history.length === 100);
+            setTyping(false);
+            refreshConversations();
+          }
+        })
+        .catch((error) => {
+          if (active) setChatError(error.message || 'Could not load this conversation.');
+        })
+        .finally(() => {
+          if (active) setMessageLoading(false);
+        });
+      return () => {
+        active = false;
+      };
+    }
+    return undefined;
+  }, [selected, screen, userId]);
+
+  useEffect(() => {
+    if (screen === 'dashboard' && activeAuthToken) {
+      setCallHistoryError('');
+      request('calls').then(setCallHistory).catch((error) => {
+        setCallHistoryError(error.message || 'Could not load call history.');
+      });
+      setConversations((previous) => previous.map((conversation) =>
+        conversation.user.id === selected.id ? { ...conversation, unreadCount: 0 } : conversation
+      ));
+    }
+  }, [screen, sessionVersion]);
+
+  useEffect(() => () => {
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    if (callExitTimerRef.current) clearTimeout(callExitTimerRef.current);
+    peerRef.current?.connection?.close();
+    localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    stopAudioRoute();
+    liveRoomRef.current?.disconnect();
+    liveRoomRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (call?.status !== 'Connected' || !call.connectedAt) {
+      setCallDuration(0);
+      return undefined;
+    }
+    const updateDuration = () => setCallDuration(Math.max(0, Math.floor((Date.now() - Date.parse(call.connectedAt)) / 1000)));
+    updateDuration();
+    const timer = setInterval(updateDuration, 1000);
+    return () => clearInterval(timer);
+  }, [call?.status, call?.connectedAt]);
+
+  // LOGIN HANDLER
+  const handleLogin = async () => {
+    setLoginError('');
+    const emailTrimmed = loginEmail.trim();
+    if (!emailTrimmed) {
+      setLoginError('Email address is required.');
+      return;
+    }
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailPattern.test(emailTrimmed)) {
+      setLoginError('Please enter a valid email address.');
+      return;
+    }
+    if (!loginPassword) {
+      setLoginError('Password is required.');
+      return;
+    }
+
+    setAuthBusy(true);
+    try {
+      const res = await request('login', {
+        method: 'POST',
+        body: JSON.stringify({ email: emailTrimmed.toLowerCase(), password: loginPassword }),
+      });
+
+      if (res && res.token && res.user) {
+        await saveSession(res, res.user.name || '');
+        setSessionVersion((value) => value + 1);
+        if (res.user.id) setUserId(res.user.id);
+        if (res.user.name) setName(res.user.name);
+        if (res.user.country) setCountry(res.user.country);
+        if (res.user.nativeLanguage) setNativeLanguage(res.user.nativeLanguage);
+        if (res.user.learningLanguage) setLearningLanguage(res.user.learningLanguage);
+        if (res.user.level) setLevel(res.user.level);
+        setLoginPassword('');
         setBackendUp(true);
-        setScreen('home');
+        setScreen('discover');
+      } else {
+        setLoginError('Authentication failed: Server did not return a valid session token.');
       }
     } catch (err) {
-      // Offline fallback login for presentation preview
-      Alert.alert('Notice', 'Signing in with local session.');
-      setCurrentUser((prev) => ({ ...prev, email: signInEmail }));
-      setScreen('home');
+      if (err.isNetworkError) {
+        setLoginError(err.message);
+      } else if (err.status === 404) {
+        setLoginError('Server error: Login endpoint (/api/login) is not implemented on the backend.');
+      } else if (err.status === 401) {
+        setLoginError('Incorrect email or password.');
+      } else if (err.status >= 500) {
+        setLoginError('The authentication service is unavailable. Please try again.');
+      } else {
+        setLoginError(err.message || 'Unable to sign in. Please verify credentials.');
+      }
     } finally {
-      setBusy(false);
+      setAuthBusy(false);
     }
   };
 
-  // Handle Sign Up (Section 5)
-  const handleSignUp = async () => {
-    if (!signUpName.trim() || !signUpEmail.trim() || !signUpPassword.trim()) {
-      Alert.alert('Missing fields', 'Please fill in all registration fields.');
+  // REGISTRATION HANDLER (Auto sign-in per Requirement 10)
+  const handleRegister = async () => {
+    setRegError('');
+    const nameTrimmed = regName.trim();
+    const emailTrimmed = regEmail.trim();
+    if (!nameTrimmed) {
+      setRegError('Full name is required.');
       return;
     }
-    if (signUpPassword !== signUpConfirm) {
-      Alert.alert('Password mismatch', 'Passwords do not match.');
+    if (!emailTrimmed) {
+      setRegError('Email address is required.');
       return;
     }
-    setBusy(true);
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailPattern.test(emailTrimmed)) {
+      setRegError('Please enter a valid email address.');
+      return;
+    }
+    if (!regPassword) {
+      setRegError('Password is required.');
+      return;
+    }
+    if (regPassword.length < 8) {
+      setRegError('Password must be at least 8 characters long.');
+      return;
+    }
+    if (!regConfirmPassword) {
+      setRegError('Please confirm your password.');
+      return;
+    }
+    if (regPassword !== regConfirmPassword) {
+      setRegError('Passwords do not match.');
+      return;
+    }
+
+    setAuthBusy(true);
     try {
-      const res = await request('auth/register', {
+      const res = await request('register', {
         method: 'POST',
         body: JSON.stringify({
-          name: signUpName,
-          email: signUpEmail,
-          password: signUpPassword,
+          name: nameTrimmed,
+          email: emailTrimmed.toLowerCase(),
+          password: regPassword,
         }),
       });
-      if (res.token && res.user) {
-        setAuthToken(res.token);
-        setCurrentUser(res.user);
-        setName(res.user.name);
+
+      if (res && res.token && res.user) {
+        // Automatically save session and sign in for 15 days
+        await saveSession(res, nameTrimmed);
+        setSessionVersion((value) => value + 1);
+        if (res.user.id) setUserId(res.user.id);
+        setName(nameTrimmed);
+        setRegPassword('');
+        setRegConfirmPassword('');
         setBackendUp(true);
-        setScreen('level');
+        // Navigate forward to Onboarding / Profile setup
+        setScreen('onboard');
+      } else {
+        setRegError('Registration failed: Server did not confirm registration.');
       }
     } catch (err) {
-      Alert.alert('Notice', 'Creating account in local session.');
-      setCurrentUser((prev) => ({ ...prev, name: signUpName, email: signUpEmail }));
-      setScreen('level');
+      if (err.isNetworkError) {
+        setRegError(err.message);
+      } else if (err.status === 404) {
+        setRegError('Server error: Registration endpoint (/api/register) is not implemented on the backend.');
+      } else {
+        setRegError(err.message || 'Unable to register. Please try again.');
+      }
     } finally {
-      setBusy(false);
+      setAuthBusy(false);
     }
   };
 
-  // Save profile updates
-  async function saveProfile(next = 'home') {
+  // LOGOUT HANDLER (Requirement 9)
+  const handleLogout = async () => {
+    leaveRoom();
+    socketRef.current?.disconnect();
+    await clearSession();
+    setSessionVersion((value) => value + 1);
+    setUserId(null);
+    setName('');
+    setCountry('');
+    setNativeLanguage('');
+    setLearningLanguage('English');
+    setLevel('Beginner');
+    setPartners([]);
+    setMessages([]);
+    setUnreadByUser({});
+    setScreen('welcome');
+  };
+
+  async function saveProfile(next) {
+    if (!name.trim() || !nativeLanguage || !learningLanguage || !country) {
+      Alert.alert('Complete your profile', 'Choose your native language, learning language, and country before continuing.');
+      return;
+    }
     setBusy(true);
     try {
-      await request('me', {
-        method: 'PATCH',
-        body: JSON.stringify({ name, alias, country, nativeLanguage, learningLanguage, level, goals }),
-      }, authToken);
-      setCurrentUser((prev) => ({ ...prev, name, alias, country, nativeLanguage, learningLanguage, level, goals }));
+      await request('onboard', {
+        method: 'POST',
+        body: JSON.stringify({ name, country, nativeLanguage, learningLanguage, level }),
+      });
       setBackendUp(true);
-      Alert.alert('Profile Updated', 'Your profile details and conversation preferences have been saved.');
-    } catch {
-      setCurrentUser((prev) => ({ ...prev, name, alias, country, nativeLanguage, learningLanguage, level, goals }));
-      Alert.alert('Saved', 'Profile updated for your current session.');
+    } catch (error) {
+      Alert.alert('Profile not saved', error.message || 'Backend not reachable. Please try again.');
+      setBusy(false);
+      return;
     }
+
     setBusy(false);
     setScreen(next);
   }
 
-  // Send Direct Message (Section 7)
   async function send() {
     if (!draft.trim()) return;
     const text = draft.trim();
@@ -320,774 +1405,1493 @@ function App() {
     try {
       const result = await request('messages', {
         method: 'POST',
-        body: JSON.stringify({ from: currentUser.id, to: selected.id, text }),
+        body: JSON.stringify({ to: selected.id, text }),
       });
       setMessages((prev) => (prev.some((x) => x.id === result.id) ? prev : [...prev, result]));
-    } catch {
-      Alert.alert('Offline notice', 'Message stored locally.');
-      const localMsg = { id: `m_${Date.now()}`, from: currentUser.id, to: selected.id, text, at: new Date().toISOString() };
-      setMessages((prev) => [...prev, localMsg]);
-    }
-  }
-
-  // Join Room (Section 8 & 9)
-  async function join(room) {
-    try {
-      await request(`rooms/${room.id}/join`, { method: 'POST' });
-      Alert.alert('Joined Audio Room', `You're now listening to "${room.name}". Microphones stay disabled by default.`);
-      refresh();
-    } catch {
-      Alert.alert('Joined Demo Room', `You're listening to "${room.name}".`);
-    }
-  }
-
-  // Request to speak / Raise Hand in Room (Section 8 & 9)
-  async function handleRaiseHand(room) {
-    try {
-      await request(`rooms/${room.id}/raise-hand`, {
-        method: 'POST',
-        body: JSON.stringify({ userId: currentUser.id })
+      setConversations((previous) => {
+        const partner = partnersRef.current.find((item) => item.id === result.to) || selected;
+        const entry = { user: partner, latestMessage: result, unreadCount: 0 };
+        return [entry, ...previous.filter((item) => item.user.id !== result.to)];
       });
-      Alert.alert('Request Sent', 'Your request to speak has been sent to the room host.');
-      refresh();
-    } catch (err) {
-      Alert.alert('Speaker Request', 'Speaker request queued.');
+      setChatError('');
+      socketRef.current?.emit('typing:stop', { to: selected.id });
+    } catch (error) {
+      setChatError(error.message || 'Message could not be sent. Check your connection and try again.');
+      setDraft(text);
     }
   }
 
-  // Create New Room (Section 8)
-  async function handleCreateRoom() {
-    if (!newRoomName.trim()) {
-      Alert.alert('Required', 'Please enter a room name.');
+  async function loadEarlierMessages() {
+    const conversation = messages
+      .filter((message) => (message.from === selected.id && message.to === userId) || (message.from === userId && message.to === selected.id))
+      .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+    const oldest = conversation[0];
+    if (!oldest || loadingOlderMessages) return;
+    setLoadingOlderMessages(true);
+    try {
+      const history = await request(`messages/${userId}/${selected.id}?limit=100&before=${encodeURIComponent(oldest.at)}`);
+      setMessages((previous) => {
+        const merged = new Map(previous.map((message) => [message.id, message]));
+        history.forEach((message) => merged.set(message.id, message));
+        return [...merged.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+      });
+      setHasOlderMessages(history.length === 100);
+    } catch (error) {
+      setChatError(error.message || 'Could not load earlier messages.');
+    } finally {
+      setLoadingOlderMessages(false);
+    }
+  }
+
+  function updateDraft(text) {
+    setDraft(text);
+    const socket = socketRef.current;
+    if (!socket?.connected) return;
+    if (!text.trim()) {
+      socket.emit('typing:stop', { to: selected.id });
       return;
     }
+    socket.emit('typing:start', { to: selected.id });
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = setTimeout(() => {
+      socket.emit('typing:stop', { to: selected.id });
+    }, 1400);
+  }
+
+  async function join(room) {
+    if (activeRoomRef.current) {
+      Alert.alert('Already in a room', 'Leave your current room before joining another one.');
+      return;
+    }
+    if (!room.mediaAvailable) {
+      setRoomError('Live audio is unavailable because the media server is not configured.');
+      return;
+    }
+    if (!socketRef.current?.connected) {
+      setRoomError('Real-time service is disconnected. Reconnect before joining a room.');
+      return;
+    }
+    setRoomError('');
+    setRoomStatus('connecting');
     try {
-      await request('rooms', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: newRoomName.trim(),
-          topic: newRoomTopic,
-          level: 'All levels',
-          capacity: Number(newRoomCapacity) || 50,
-          hostId: currentUser.id
-        })
+      const session = await request(`rooms/${room.id}/session`);
+      const liveRoom = await connectLiveRoom({
+        url: session.url,
+        token: session.token,
+        onEvent: (event) => {
+          if (event.type === 'connection') console.log('[BYTALK room] media connection', { roomId: room.id, state: event.state });
+          if (event.type === 'track-subscribed') console.log('[BYTALK room] remote audio subscribed', { roomId: room.id, participantId: event.participantId });
+          if (event.type === 'disconnected' && activeRoomRef.current?.id === room.id) {
+            setRoomStatus('error');
+            setRoomError('The live audio connection ended.');
+          }
+        },
       });
-      setShowCreateRoomModal(false);
-      setNewRoomName('');
-      Alert.alert('Room Created', 'Your live audio room is now open for practice.');
-      refresh();
-    } catch {
-      Alert.alert('Notice', 'Room created in session.');
-      setShowCreateRoomModal(false);
+      const response = await emitWithAck('room:join', { roomId: room.id });
+      liveRoomRef.current = liveRoom;
+      setActiveRoom(room);
+      setRoomParticipants(response.participants || []);
+      setRoomMuted(false);
+      setRoomStatus('connected');
+    } catch (error) {
+      liveRoomRef.current?.disconnect();
+      liveRoomRef.current = null;
+      setRoomStatus('error');
+      setRoomError(error.message || 'Could not join this live audio room.');
+      Alert.alert('Could not join room', error.message || 'Microphone permission or live audio connection failed.');
     }
   }
 
-  // Add Vocabulary Word / Phrase (Section 10 & 11)
-  async function addWord(wordText) {
-    if (!wordText || !wordText.trim()) return;
-    try {
-      const item = await request('vocabulary', {
-        method: 'POST',
-        body: JSON.stringify({ userId: currentUser.id, word: wordText.trim(), category: 'Saved Practice' }),
-      });
-      setVocab((v) => [...v, item]);
-      setCurrentUser((prev) => ({ ...prev, words: (prev.words || 0) + 1 }));
-    } catch {
-      setVocab((v) => [...v, { id: `v_${Date.now()}`, word: wordText, category: 'Saved' }]);
-    }
+  function leaveRoom() {
+    const roomId = activeRoomRef.current?.id;
+    if (roomId) socketRef.current?.emit('room:leave', { roomId });
+    liveRoomRef.current?.disconnect();
+    liveRoomRef.current = null;
+    activeRoomRef.current = null;
+    setActiveRoom(null);
+    setRoomParticipants([]);
+    setRoomMuted(false);
+    setRoomStatus('idle');
   }
 
-  // Claim Referral Code (Section 15)
-  async function handleClaimReferral() {
-    if (!inputReferralCode.trim()) return;
+  async function toggleRoomMute() {
+    if (!liveRoomRef.current) return;
+    const next = !roomMuted;
+    await liveRoomRef.current.setMuted(next);
+    setRoomMuted(next);
+  }
+
+  async function addWord() {
+    if (!word.trim()) return;
     try {
-      const res = await request('referrals/claim', {
+      const x = await request('vocabulary', {
         method: 'POST',
-        body: JSON.stringify({ referralCode: inputReferralCode.trim(), newUserId: currentUser.id })
+        body: JSON.stringify({ userId, word, category: 'Conversation' }),
       });
-      Alert.alert('Referral Applied!', `Attributed to ${res.inviterAlias || 'your friend'}. Thank you for joining BYTALK.`);
-      setInputReferralCode('');
-      setShowReferralModal(false);
-    } catch (err) {
-      Alert.alert('Referral Error', err.message || 'Invalid or expired referral code.');
+      setVocab((v) => [...v, x]);
+      setWord('');
+    } catch {
+      Alert.alert('Connection required', 'Start backend first.');
     }
   }
 
   const tabItems = [
-    ['home', 'home', 'Home'],
     ['discover', 'compass', 'Discover'],
     ['rooms', 'mic', 'Rooms'],
     ['chat', 'chatbubbles', 'Messages'],
+    ['dashboard', 'bar-chart', 'Profile'],
   ];
+  const filteredPartners = partners.filter((partner) =>
+    [partner.displayName, partner.name, partner.country, partner.nativeLanguage, partner.learningLanguage, partner.level]
+      .join(' ')
+      .toLowerCase()
+      .includes(search.toLowerCase())
+  );
 
-  const isMainTabScreen = ['home', 'dashboard', 'discover', 'rooms', 'chat'].includes(screen);
+  const Header = ({ title, subtitle, onBack }) => (
+    <View style={{ paddingHorizontal: 22, paddingTop: 14, paddingBottom: 14 }}>
+      {onBack && (
+        <TouchableOpacity onPress={onBack} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 12 }}>
+          <Ionicons name="arrow-back" size={20} color={navy} />
+          <Txt size={14} color={muted} style={{ marginLeft: 6 }}>Back</Txt>
+        </TouchableOpacity>
+      )}
+      <Txt size={26} bold>{title}</Txt>
+      {subtitle && <Txt color={muted} style={{ marginTop: 5 }}>{subtitle}</Txt>}
+    </View>
+  );
+
+  const Field = ({ label, value, setValue, placeholder }) => (
+    <View style={{ marginBottom: 15 }}>
+      <Txt size={13} bold style={{ marginBottom: 8 }}>{label}</Txt>
+      <TextInput
+        value={value}
+        onChangeText={setValue}
+        placeholder={placeholder}
+        placeholderTextColor="#9CA3AF"
+        style={{
+          backgroundColor: '#fff',
+          borderColor: border,
+          borderWidth: 1,
+          borderRadius: 14,
+          padding: 15,
+          color: navy,
+          fontSize: 15,
+        }}
+      />
+    </View>
+  );
+
+  if (sessionChecking) {
+    return (
+      <SafeAreaView style={[styles.safeArea, { justifyContent: 'center', alignItems: 'center' }]}>
+        <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
+        <View style={{ alignItems: 'center' }}>
+          <Text style={{ fontSize: 38, fontWeight: '900', color: COLORS.primary, marginBottom: 14 }}>BT</Text>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Txt color={COLORS.textSecondary} size={13} style={{ marginTop: 12 }}>Restoring session...</Txt>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: '#FFFFFF' }}>
-      <StatusBar barStyle="dark-content" backgroundColor="#FFFFFF" />
-
-      {/* SCREEN 1: WELCOME SCREEN */}
-      {screen === 'welcome' && (
-        <ScrollView contentContainerStyle={styles.welcomeContainer} showsVerticalScrollIndicator={false}>
-          <View style={styles.topBrandHeader}>
-            <View style={styles.logoAndTitleRow}>
-              <Image source={require('./assets/logo_icon.png')} style={styles.brandIcon} resizeMode="contain" />
-              <Text style={styles.brandTitle}>
-                BY<Text style={{ color: orange }}>TALK</Text>
-              </Text>
-            </View>
-            <Text style={styles.brandSubtitle}>TALK • LEARN • CONNECT</Text>
-          </View>
-
-          <View style={styles.heroTextSection}>
-            <Text style={styles.heroMainTitle}>Speak English{'\n'}With Real Partners</Text>
-            <Text style={styles.heroSubText}>
-              Overcome spoken hesitation with anonymous 1-on-1 audio chats, live rooms, and everyday vocabulary games.
-            </Text>
-          </View>
-
-          <View style={styles.heroIllustrationContainer}>
-            <Image source={require('./assets/hero_illustration.png')} style={styles.heroIllustrationImage} resizeMode="contain" />
-          </View>
-
-          <View style={styles.welcomeFooter}>
-            <TouchableOpacity onPress={() => setScreen('signup')} activeOpacity={0.9} style={styles.getStartedButtonShadow}>
-              <LinearGradient colors={[orange, orangeDark]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={styles.getStartedGradient}>
-                <Text style={styles.getStartedButtonText}>Get Started Free</Text>
-                <Ionicons name="arrow-forward" size={19} color="#FFFFFF" style={{ marginLeft: 6 }} />
-              </LinearGradient>
-            </TouchableOpacity>
-
-            <View style={styles.signInRow}>
-              <Text style={styles.signInLabel}>Already have an account? </Text>
-              <TouchableOpacity onPress={() => setScreen('signin')} activeOpacity={0.7}>
-                <Text style={styles.signInLink}>Sign In</Text>
+    <SafeAreaView style={styles.safeArea}>
+      <StatusBar barStyle="dark-content" backgroundColor="#ffffff" />
+      <View style={styles.webShell}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={{ flex: 1 }}
+        >
+          {/* Top brand header */}
+          {!['welcome', 'login', 'register'].includes(screen) && (
+            <View style={styles.topBar}>
+              <TouchableOpacity onPress={() => setScreen('welcome')} style={styles.logoRowSmall}>
+                <Text style={{ fontSize: 20, fontWeight: '900', color: COLORS.primary, marginRight: 6 }}>BT</Text>
+                <Text style={{ fontSize: 20, fontWeight: '900', color: navy }}>
+                  BY<Text style={{ color: orange }}>TALK</Text>
+                </Text>
               </TouchableOpacity>
-            </View>
-          </View>
-        </ScrollView>
-      )}
-
-      {/* SCREEN: SIGN IN (Section 5) */}
-      {screen === 'signin' && (
-        <ScrollView contentContainerStyle={{ padding: 24, flexGrow: 1 }} keyboardShouldPersistTaps="handled">
-          <TouchableOpacity onPress={() => setScreen('welcome')} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 20 }}>
-            <Ionicons name="arrow-back" size={24} color={navy} />
-            <Txt size={14} color={muted} style={{ marginLeft: 6 }}>Back</Txt>
-          </TouchableOpacity>
-
-          <View style={{ alignItems: 'center', marginBottom: 24 }}>
-            <Text style={{ fontSize: 26, fontWeight: '900', color: navy }}>
-              BY<Text style={{ color: orange }}>TALK</Text>
-            </Text>
-            <Txt size={22} bold style={{ marginTop: 8 }}>Welcome Back</Txt>
-            <Txt size={13} color={muted} style={{ textAlign: 'center', marginTop: 4 }}>
-              Sign in to resume anonymous speaking practice and vocabulary challenges.
-            </Txt>
-          </View>
-
-          <Field label="Email Address or Username" value={signInEmail} setValue={setSignInEmail} placeholder="e.g. vedant@bytalk.app" />
-          <Field label="Password" value={signInPassword} setValue={setSignInPassword} placeholder="••••••••" secureTextEntry />
-
-          <Btn label={busy ? 'Signing In...' : 'Sign In  →'} onPress={handleSignIn} style={{ marginTop: 8 }} />
-
-          <View style={{ flexDirection: 'row', justifyContent: 'center', marginTop: 24 }}>
-            <Txt color={muted}>Don't have an account? </Txt>
-            <TouchableOpacity onPress={() => setScreen('signup')}>
-              <Txt color={orange} bold>Create Account</Txt>
-            </TouchableOpacity>
-          </View>
-        </ScrollView>
-      )}
-
-      {/* SCREEN: SIGN UP (Section 5) */}
-      {screen === 'signup' && (
-        <ScrollView contentContainerStyle={{ padding: 24, flexGrow: 1 }} keyboardShouldPersistTaps="handled">
-          <TouchableOpacity onPress={() => setScreen('welcome')} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 20 }}>
-            <Ionicons name="arrow-back" size={24} color={navy} />
-            <Txt size={14} color={muted} style={{ marginLeft: 6 }}>Back</Txt>
-          </TouchableOpacity>
-
-          <View style={{ alignItems: 'center', marginBottom: 24 }}>
-            <Text style={{ fontSize: 26, fontWeight: '900', color: navy }}>
-              BY<Text style={{ color: orange }}>TALK</Text>
-            </Text>
-            <Txt size={22} bold style={{ marginTop: 8 }}>Create Your Account</Txt>
-            <Txt size={13} color={muted} style={{ textAlign: 'center', marginTop: 4 }}>
-              Join thousands practicing conversational English every day.
-            </Txt>
-          </View>
-
-          <Field label="Full Name or Alias" value={signUpName} setValue={setSignUpName} placeholder="e.g. Vedant Kengale" />
-          <Field label="Email Address" value={signUpEmail} setValue={setSignUpEmail} placeholder="e.g. vedant@bytalk.app" />
-          <Field label="Password (min 6 characters)" value={signUpPassword} setValue={setSignUpPassword} placeholder="••••••••" secureTextEntry />
-          <Field label="Confirm Password" value={signUpConfirm} setValue={setSignUpConfirm} placeholder="••••••••" secureTextEntry />
-
-          <Btn label={busy ? 'Registering...' : 'Continue  →'} onPress={handleSignUp} style={{ marginTop: 8 }} />
-
-          <View style={{ flexDirection: 'row', justifyContent: 'center', marginTop: 24 }}>
-            <Txt color={muted}>Already have an account? </Txt>
-            <TouchableOpacity onPress={() => setScreen('signin')}>
-              <Txt color={orange} bold>Sign In</Txt>
-            </TouchableOpacity>
-          </View>
-        </ScrollView>
-      )}
-
-      {/* SCREEN: PROFICIENCY LEVEL (Section 5) */}
-      {screen === 'level' && (
-        <ScrollView contentContainerStyle={{ padding: 22 }}>
-          <Header
-            title="Choose your level"
-            subtitle="Select your current proficiency so we can match you with suitable conversation partners."
-            onBack={() => setScreen(currentUser ? 'home' : 'welcome')}
-          />
-          {[
-            ['🌱', 'Beginner', 'I know a few basic words and simple expressions.'],
-            ['🍃', 'Elementary', 'I can understand and hold basic conversations.'],
-            ['📊', 'Intermediate', 'I can communicate comfortably in daily situations.'],
-            ['📘', 'Upper Intermediate', 'I can discuss diverse topics with confidence.'],
-            ['🎓', 'Advanced', 'I can express myself fluently and spontaneously.'],
-            ['👑', 'Proficient', 'I communicate near native fluency.'],
-          ].map(([emoji, n, desc]) => (
-            <TouchableOpacity
-              key={n}
-              onPress={() => setLevel(n)}
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                padding: 15,
-                marginBottom: 11,
-                borderWidth: 1.5,
-                borderColor: level === n ? orange : border,
-                borderRadius: 14,
-                backgroundColor: level === n ? orangeLight : '#fff',
-              }}
-            >
-              <Txt size={28}>{emoji}</Txt>
-              <View style={{ flex: 1, marginLeft: 15 }}>
-                <Txt bold size={15}>{n}</Txt>
-                <Txt size={12} color={muted} style={{ marginTop: 2 }}>{desc}</Txt>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
+                  <View style={{ width: 7, height: 7, borderRadius: 6, backgroundColor: backendUp ? '#168653' : '#F0B64A' }} />
+                  <Txt size={11} color={muted}>{backendUp ? 'API Online' : 'API Offline'}</Txt>
+                </View>
+                <TouchableOpacity onPress={handleLogout} style={styles.topLogoutButton} activeOpacity={0.7}>
+                  <Ionicons name="log-out-outline" size={18} color={COLORS.textSecondary} />
+                </TouchableOpacity>
               </View>
-              <Ionicons
-                name={level === n ? 'radio-button-on' : 'radio-button-off'}
-                color={level === n ? orange : '#aab3c0'}
-                size={22}
-              />
-            </TouchableOpacity>
-          ))}
-          <Btn label={busy ? 'Saving...' : 'Start Practicing  →'} onPress={() => saveProfile('home')} style={{ marginTop: 8 }} />
-        </ScrollView>
-      )}
-
-      {/* SCREEN: EDIT PROFILE INFO (Section 5.2 & 16) */}
-      {(screen === 'onboard' || screen === 'edit-profile') && (
-        <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 40 }} keyboardShouldPersistTaps="handled">
-          <Header
-            title="Edit Profile Info"
-            subtitle="Update your nickname, languages, and conversation preferences."
-            onBack={() => setScreen('home')}
-          />
-
-          <View style={{ alignItems: 'center', marginVertical: 14 }}>
-            <View style={{ width: 72, height: 72, borderRadius: 36, backgroundColor: orangeLight, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#FFD6C7' }}>
-              <Txt size={36}>👨🏽‍💻</Txt>
             </View>
-            <Txt size={16} bold style={{ marginTop: 8 }}>{name || 'Learner'}</Txt>
-            <Txt size={12} color={muted}>{currentUser.email || 'learner@bytalk.app'}</Txt>
-          </View>
+          )}
+          {messageBanner && (
+            <TouchableOpacity
+              onPress={() => openConversation(messageBanner.sender)}
+              style={{ marginHorizontal: 14, marginTop: 8, padding: 12, borderRadius: 12, backgroundColor: '#FFF0E8', borderWidth: 1, borderColor: '#FFD4C2' }}
+            >
+              <Txt size={12} color={navy} bold>{messageBanner.sender.displayName || messageBanner.sender.name}: <Txt size={12} color={navy} bold={false}>{messageBanner.text}</Txt></Txt>
+            </TouchableOpacity>
+          )}
 
-          <Field label="Full Name" value={name} setValue={setName} placeholder="e.g. Vedant Kengale" />
-          <Field label="Public Alias / Nickname (Shown to Call Partners)" value={alias} setValue={setAlias} placeholder="e.g. VedantK" />
-          <Field label="My Country / Region" value={country} setValue={setCountry} placeholder="e.g. India" />
-          <Field label="Native Language" value={nativeLanguage} setValue={setNativeLanguage} placeholder="e.g. Hindi" />
-          <Field label="Language I'm Practicing" value={learningLanguage} setValue={setLearningLanguage} placeholder="e.g. English" />
+          {/* SCREEN 1: WELCOME SCREEN */}
+          {screen === 'welcome' && (
+            <ScrollView
+              contentContainerStyle={[
+                styles.welcomeScrollContainer,
+                isShortViewport && { justifyContent: 'flex-start' },
+              ]}
+              showsVerticalScrollIndicator={false}
+              bounces={false}
+              keyboardShouldPersistTaps="handled"
+            >
+              {/* Brand Header */}
+              <View style={styles.welcomeHeader}>
+                <View style={styles.brandRow}>
+                  <View style={{ width: 40, height: 40, alignItems: 'center', justifyContent: 'center' }}>
+                    <Ionicons name="chatbubble-ellipses" size={34} color={COLORS.primary} />
+                  </View>
+                  <Text style={styles.brandTitle}>
+                    BY<Text style={{ color: COLORS.primary }}>TALK</Text>
+                  </Text>
+                </View>
+                <Text style={styles.brandSubtitle}>Talk  •  Learn  •  Connect</Text>
+              </View>
 
-          <Txt size={13} bold style={{ marginBottom: 6, marginTop: 4 }}>Primary Learning Goal</Txt>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 20 }}>
-            {['Daily Conversation', 'Job Interviews', 'IELTS Practice', 'Travel', 'Work & Business'].map((g) => (
-              <TouchableOpacity
-                key={g}
-                onPress={() => setGoals(g)}
-                style={{
-                  backgroundColor: goals === g ? orange : light,
-                  paddingHorizontal: 14,
-                  paddingVertical: 8,
-                  borderRadius: 18,
-                  borderWidth: 1,
-                  borderColor: goals === g ? orange : border,
-                }}
+              {/* Hero Headlines */}
+              <View style={styles.heroTextSection}>
+                <Text style={styles.heroMainTitle}>Find Your{'\n'}Language Partner</Text>
+                <Text style={styles.heroSubText}>
+                  Make global friends, practice languages{'\n'}and explore new cultures.
+                </Text>
+              </View>
+
+              {/* Hero Illustration */}
+              <View
+                style={[
+                  styles.heroIllustrationContainer,
+                  {
+                    flexGrow: isShortViewport ? 0 : 1,
+                    height: isShortViewport ? welcomeIllustrationHeight : undefined,
+                    minHeight: isShortViewport ? welcomeIllustrationHeight : 230,
+                    maxHeight: Math.min(420, viewportHeight * 0.48),
+                  },
+                ]}
               >
-                <Txt size={12} color={goals === g ? '#fff' : navy} bold={goals === g}>
-                  {g}
-                </Txt>
-              </TouchableOpacity>
-            ))}
-          </View>
+                <Image
+                  source={welcomeImage}
+                  style={styles.heroIllustrationImage}
+                  resizeMode="contain"
+                  accessibilityLabel="BYTALK language partner welcome illustration"
+                />
+              </View>
 
-          <Btn label={busy ? 'Saving Changes...' : 'Save Profile Changes'} onPress={() => saveProfile('home')} style={{ marginTop: 8 }} />
-
-          <TouchableOpacity
-            onPress={() => setScreen('home')}
-            style={{ alignItems: 'center', marginTop: 16, paddingVertical: 10 }}
-          >
-            <Txt color={muted} size={14} bold>Cancel & Return to Dashboard</Txt>
-          </TouchableOpacity>
-        </ScrollView>
-      )}
-
-      {/* SCREEN: HOME DASHBOARD (Section 6, 10, 11, 14 - UserDashboard Component) */}
-      {(screen === 'home' || screen === 'dashboard') && (
-        <UserDashboard
-          user={currentUser}
-          userStats={{
-            streak: currentUser.streak || 12,
-            minutes: currentUser.minutes || 150,
-            words: (currentUser.words || 28) + vocab.length,
-            savedPhrases: currentUser.savedPhrases || [],
-          }}
-          partners={partners}
-          rooms={rooms}
-          messages={messages}
-          vocabulary={vocab}
-          backendUp={backendUp}
-          onNavigate={(targetScreen) => {
-            if (targetScreen === 'settings') setShowSafetyModal(true);
-            else if (targetScreen === 'referrals') setShowReferralModal(true);
-            else setScreen(targetScreen);
-          }}
-          onSelectPartner={(partner) => {
-            setSelected(partner);
-            setScreen('chat');
-          }}
-          onJoinRoom={join}
-          onAddWord={addWord}
-          onLogout={() => {
-            setAuthToken(null);
-            setScreen('welcome');
-          }}
-          onRefresh={refresh}
-        />
-      )}
-
-      {/* SCREEN: DISCOVER PARTNERS (Section 7) */}
-      {screen === 'discover' && (
-        <>
-          <Header
-            title="Find Practice Partners"
-            subtitle="Meet English learners worldwide. Anonymity and safety preserved."
-            onBack={() => setScreen('home')}
-          />
-          <View style={styles.searchBar}>
-            <Ionicons name="search" size={19} color={muted} />
-            <TextInput
-              placeholder="Search by name, country, or native language..."
-              placeholderTextColor="#9CA3AF"
-              value={search}
-              onChangeText={setSearch}
-              style={{ flex: 1, padding: 12, color: navy, fontSize: 14 }}
-            />
-          </View>
-          <ScrollView contentContainerStyle={{ padding: 22 }}>
-            {partners
-              .filter((p) => [p.name, p.country, p.nativeLanguage, p.level].join(' ').toLowerCase().includes(search.toLowerCase()))
-              .map((p, i) => (
-                <View key={p.id} style={styles.partnerCard}>
-                  <View style={[styles.avatarCircle, { backgroundColor: ['#FFE0D3', '#D6EBFC', '#FFE8D9', '#E6F9F0'][i % 4] }]}>
-                    <Txt size={25}>{['👩🏻', '👨🏽', '👩🏻‍🦰', '👨🏾', '👩🏽'][i % 5]}</Txt>
-                  </View>
-                  <View style={{ flex: 1, marginLeft: 12 }}>
-                    <Txt bold size={15}>
-                      {p.alias || p.name}  <Txt size={12} color={muted}>({p.country})</Txt>
-                    </Txt>
-                    <Txt size={11} color={muted} style={{ marginTop: 2 }}>
-                      Speaks: {p.nativeLanguage} • Learning: English
-                    </Txt>
-                    <Txt size={11} color="#FF6847" style={{ marginTop: 2, fontWeight: '600' }}>
-                      {p.level} • {p.online ? '🟢 Online' : '⚪ Offline'}
-                    </Txt>
-                  </View>
-                  <TouchableOpacity
-                    onPress={() => {
-                      setSelected(p);
-                      setScreen('chat');
-                    }}
-                    style={styles.chatButtonOutline}
+              {/* Action Buttons */}
+              <View style={styles.welcomeFooter}>
+                <TouchableOpacity
+                  activeOpacity={0.88}
+                  style={styles.primaryButtonShadow}
+                  onPress={() => setScreen('login')}
+                >
+                  <LinearGradient
+                    colors={[COLORS.primary, COLORS.secondary]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.primaryGradientButton}
                   >
-                    <Txt color={orange} size={12} bold>Chat</Txt>
+                    <Text style={styles.primaryButtonText}>Get Started</Text>
+                    <Ionicons name="arrow-forward" size={19} color="#FFFFFF" style={{ marginLeft: 6 }} />
+                  </LinearGradient>
+                </TouchableOpacity>
+
+                <View style={styles.footerLinkRow}>
+                  <Text style={styles.footerLabel}>Already have an account? </Text>
+                  <TouchableOpacity onPress={() => setScreen('login')} activeOpacity={0.7}>
+                    <Text style={styles.footerLinkBold}>Sign In</Text>
                   </TouchableOpacity>
                 </View>
-              ))}
-          </ScrollView>
-        </>
-      )}
+              </View>
+            </ScrollView>
+          )}
 
-      {/* SCREEN: LIVE AUDIO ROOMS (Section 8 & 9) */}
-      {screen === 'rooms' && (
-        <>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 14 }}>
-            <Header
-              title="Live Audio Rooms"
-              subtitle="Listen without activating your mic, or request to speak."
-              onBack={() => setScreen('home')}
-            />
-          </View>
-
-          <View style={{ paddingHorizontal: 20, marginBottom: 10, flexDirection: 'row', justifyContent: 'space-between' }}>
-            <TouchableOpacity
-              onPress={() => setShowCreateRoomModal(true)}
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                backgroundColor: orangeLight,
-                paddingHorizontal: 14,
-                paddingVertical: 8,
-                borderRadius: 20,
-                borderColor: orange,
-                borderWidth: 1
-              }}
+          {/* SCREEN 2: LOGIN SCREEN */}
+          {screen === 'login' && (
+            <ScrollView
+              contentContainerStyle={styles.authScrollContainer}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
             >
-              <Ionicons name="add-circle" size={18} color={orange} style={{ marginRight: 6 }} />
-              <Txt size={12} color={orange} bold>Create Room</Txt>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              onPress={() => setShowSafetyModal(true)}
-              style={{ flexDirection: 'row', alignItems: 'center' }}
-            >
-              <Ionicons name="shield-checkmark" size={16} color="#10B981" style={{ marginRight: 4 }} />
-              <Txt size={11} color={muted}>Audio Safety Policy</Txt>
-            </TouchableOpacity>
-          </View>
-
-          <ScrollView contentContainerStyle={{ paddingHorizontal: 20 }}>
-            <View style={{ flexDirection: 'row', gap: 8, marginBottom: 18, flexWrap: 'wrap' }}>
-              {['All', 'Daily English', 'Interviews', 'IELTS Practice', 'Travel'].map((f) => (
+              {/* Top Navigation Bar with Back Button and Health status */}
+              <View style={styles.authTopNav}>
                 <TouchableOpacity
-                  key={f}
-                  onPress={() => setFilter(f)}
-                  style={{
-                    backgroundColor: filter === f ? orange : light,
-                    paddingHorizontal: 14,
-                    paddingVertical: 8,
-                    borderRadius: 20,
+                  onPress={() => {
+                    setLoginError('');
+                    setScreen('welcome');
                   }}
+                  style={styles.backButton}
+                  activeOpacity={0.7}
                 >
-                  <Txt size={12} color={filter === f ? '#fff' : navy} bold={filter === f}>{f}</Txt>
+                  <Ionicons name="arrow-back" size={22} color={COLORS.textPrimary} />
                 </TouchableOpacity>
-              ))}
-            </View>
+                <View style={{ flex: 1 }} />
+                <View style={styles.healthBadge}>
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: backendUp ? '#168653' : '#F0B64A' }} />
+                  <Txt size={11} color={muted}>{backendUp ? 'API Online' : 'API Offline'}</Txt>
+                </View>
+              </View>
 
-            {rooms
-              .filter((r) => filter === 'All' || r.topic === filter)
-              .map((room, i) => (
-                <View key={room.id} style={styles.roomCard}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                    <View style={{ backgroundColor: ['#FFE3C9', '#CDE8FB', '#E1F5E5', '#E7DDFE'][i % 4], borderRadius: 12, padding: 12 }}>
-                      <Txt size={22}>{['🎙️', '💼', '📘', '✈️'][i % 4]}</Txt>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Txt bold size={15}>{room.name}</Txt>
-                      <Txt size={12} color={muted} style={{ marginTop: 2 }}>{room.topic} • {room.level}</Txt>
-                    </View>
-                    <Txt size={11} color="#16ac64" bold>● Live</Txt>
+              {/* Centered Brand Header */}
+              <View style={styles.authBrandHeader}>
+                <View style={styles.authBrandRow}>
+                  <Ionicons name="chatbubble-ellipses" size={36} color={COLORS.primary} />
+                  <Text style={styles.authBrandTitle}>
+                    BY<Text style={{ color: COLORS.primary }}>TALK</Text>
+                  </Text>
+                </View>
+                <Text style={styles.authBrandSubtitle}>Talk  •  Learn  •  Connect</Text>
+              </View>
+
+              {/* Title & Subtitle */}
+              <View style={styles.authHeadingBlock}>
+                <Text style={styles.authHeadingTitle}>Welcome Back</Text>
+                <Text style={styles.authHeadingSubtitle}>Sign in to continue your language journey</Text>
+              </View>
+
+              {/* Server or Validation Error Alert */}
+              {loginError ? (
+                <View style={styles.errorAlertContainer}>
+                  <Ionicons name="alert-circle" size={18} color={COLORS.error} style={{ marginRight: 8 }} />
+                  <Text style={styles.errorAlertText}>{loginError}</Text>
+                </View>
+              ) : null}
+
+              {/* Form Fields */}
+              <View style={styles.authForm}>
+                {/* Email Field */}
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Email Address</Text>
+                  <View
+                    style={[
+                      styles.inputFieldBox,
+                      focusedField === 'loginEmail' && styles.inputFieldBoxFocused,
+                    ]}
+                  >
+                    <Ionicons
+                      name="mail-outline"
+                      size={20}
+                      color={focusedField === 'loginEmail' ? COLORS.primary : COLORS.textSecondary}
+                    />
+                    <TextInput
+                      value={loginEmail}
+                      onChangeText={(val) => {
+                        setLoginEmail(val);
+                        if (loginError) setLoginError('');
+                      }}
+                      onFocus={() => setFocusedField('loginEmail')}
+                      onBlur={() => setFocusedField('')}
+                      placeholder="name@example.com"
+                      placeholderTextColor="#9CA3AF"
+                      keyboardType="email-address"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      style={styles.authInput}
+                    />
                   </View>
+                </View>
 
-                  <Txt size={12} color={muted} style={{ marginVertical: 14 }}>
-                    👥 {room.listeners + (room.joined || 0)} listening • Capacity: {room.capacity || 50}
-                  </Txt>
-
-                  <View style={{ flexDirection: 'row', gap: 10 }}>
-                    <TouchableOpacity
-                      onPress={() => join(room)}
-                      style={{
-                        flex: 1,
-                        backgroundColor: orange,
-                        paddingVertical: 12,
-                        borderRadius: 22,
-                        alignItems: 'center'
+                {/* Password Field */}
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Password</Text>
+                  <View
+                    style={[
+                      styles.inputFieldBox,
+                      focusedField === 'loginPassword' && styles.inputFieldBoxFocused,
+                    ]}
+                  >
+                    <Ionicons
+                      name="lock-closed-outline"
+                      size={20}
+                      color={focusedField === 'loginPassword' ? COLORS.primary : COLORS.textSecondary}
+                    />
+                    <TextInput
+                      value={loginPassword}
+                      onChangeText={(val) => {
+                        setLoginPassword(val);
+                        if (loginError) setLoginError('');
                       }}
-                    >
-                      <Txt color="#fff" bold size={13}>Listen Publicly</Txt>
-                    </TouchableOpacity>
-
+                      onFocus={() => setFocusedField('loginPassword')}
+                      onBlur={() => setFocusedField('')}
+                      placeholder="Enter your password"
+                      placeholderTextColor="#9CA3AF"
+                      secureTextEntry={!showLoginPassword}
+                      autoCapitalize="none"
+                      style={styles.authInput}
+                    />
                     <TouchableOpacity
-                      onPress={() => handleRaiseHand(room)}
-                      style={{
-                        borderWidth: 1.5,
-                        borderColor: orange,
-                        paddingHorizontal: 16,
-                        paddingVertical: 12,
-                        borderRadius: 22,
-                        flexDirection: 'row',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 6
-                      }}
+                      onPress={() => setShowLoginPassword(!showLoginPassword)}
+                      activeOpacity={0.7}
+                      style={styles.passwordToggle}
                     >
-                      <Ionicons name="hand-right" size={16} color={orange} />
-                      <Txt color={orange} bold size={12}>Raise Hand</Txt>
+                      <Ionicons
+                        name={showLoginPassword ? 'eye-off-outline' : 'eye-outline'}
+                        size={20}
+                        color={COLORS.textSecondary}
+                      />
                     </TouchableOpacity>
                   </View>
                 </View>
-              ))}
-          </ScrollView>
-        </>
-      )}
 
-      {/* SCREEN: DIRECT CHAT (Section 7) */}
-      {screen === 'chat' && (
-        <>
-          <View style={styles.chatHeader}>
-            <TouchableOpacity onPress={() => setScreen('discover')}>
-              <Ionicons name="arrow-back" size={22} color={navy} />
-            </TouchableOpacity>
-            <View style={{ flex: 1, marginLeft: 12 }}>
-              <Txt size={16} bold>{selected?.alias || selected?.name || 'Partner'}</Txt>
-              <Txt size={11} color="#18b576">● Online • {selected?.country || 'Global'}</Txt>
-            </View>
-            <TouchableOpacity
-              onPress={() => {
-                Alert.alert('Report User', 'File a safety report to moderators?', [
-                  { text: 'Cancel', style: 'cancel' },
-                  {
-                    text: 'Report & Block',
-                    style: 'destructive',
-                    onPress: async () => {
-                      try {
-                        await request('reports', {
-                          method: 'POST',
-                          body: JSON.stringify({
-                            reporterId: currentUser.id,
-                            reportedUserId: selected.id,
-                            reason: 'Inappropriate communication reported from direct chat.'
-                          })
-                        });
-                        Alert.alert('User Reported', 'Moderation team has received your report. The user has been blocked.');
-                        setScreen('discover');
-                      } catch {
-                        Alert.alert('Reported', 'User flagged.');
-                      }
-                    }
-                  }
-                ]);
-              }}
-              style={{ padding: 6 }}
+                {/* Forgot Password Action */}
+                <View style={styles.forgotPasswordRow}>
+                  <TouchableOpacity
+                    onPress={() => Alert.alert('Forgot Password', 'Password reset instructions will be sent to your email.')}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.forgotPasswordText}>Forgot Password?</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Full-Width Orange Sign In Button */}
+                <TouchableOpacity
+                  activeOpacity={0.88}
+                  style={[styles.primaryButtonShadow, { marginTop: 8 }]}
+                  onPress={handleLogin}
+                  disabled={authBusy}
+                >
+                  <LinearGradient
+                    colors={[COLORS.primary, COLORS.secondary]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.primaryGradientButton}
+                  >
+                    {authBusy ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <Text style={styles.primaryButtonText}>Sign In</Text>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              </View>
+
+              {/* Bottom Link to Registration */}
+              <View style={[styles.footerLinkRow, styles.authFooterLinkRow]}>
+                <Text style={styles.footerLabel}>Don't have an account? </Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    setLoginError('');
+                    setScreen('register');
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.footerLinkBold}>Sign Up</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          )}
+
+          {/* SCREEN 3: REGISTRATION SCREEN */}
+          {screen === 'register' && (
+            <ScrollView
+              contentContainerStyle={styles.authScrollContainer}
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
             >
-              <Ionicons name="shield-outline" size={20} color={muted} />
-            </TouchableOpacity>
-          </View>
+              {/* Top Navigation Bar with Back Button and Health status */}
+              <View style={styles.authTopNav}>
+                <TouchableOpacity
+                  onPress={() => {
+                    setRegError('');
+                    setScreen('login');
+                  }}
+                  style={styles.backButton}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="arrow-back" size={22} color={COLORS.textPrimary} />
+                </TouchableOpacity>
+                <View style={{ flex: 1 }} />
+                <View style={styles.healthBadge}>
+                  <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: backendUp ? '#168653' : '#F0B64A' }} />
+                  <Txt size={11} color={muted}>{backendUp ? 'API Online' : 'API Offline'}</Txt>
+                </View>
+              </View>
 
-          <ScrollView contentContainerStyle={{ padding: 16, flexGrow: 1, justifyContent: 'flex-end' }}>
-            {messages.length === 0 ? (
-              <View style={{ alignItems: 'center', paddingVertical: 40 }}>
-                <Txt size={40}>👋</Txt>
-                <Txt size={15} bold style={{ marginTop: 10 }}>Say Hello to {selected?.alias || selected?.name}!</Txt>
-                <Txt size={12} color={muted} style={{ textAlign: 'center', marginTop: 4 }}>
-                  Start your conversation practicing English greetings or asking about hobbies.
+              {/* Centered Brand Header */}
+              <View style={styles.authBrandHeader}>
+                <View style={styles.authBrandRow}>
+                  <Ionicons name="chatbubble-ellipses" size={36} color={COLORS.primary} />
+                  <Text style={styles.authBrandTitle}>
+                    BY<Text style={{ color: COLORS.primary }}>TALK</Text>
+                  </Text>
+                </View>
+                <Text style={styles.authBrandSubtitle}>Talk  •  Learn  •  Connect</Text>
+              </View>
+
+              {/* Title & Subtitle */}
+              <View style={styles.authHeadingBlock}>
+                <Text style={styles.authHeadingTitle}>Create Account</Text>
+                <Text style={styles.authHeadingSubtitle}>Start your language learning journey</Text>
+              </View>
+
+              {/* Server or Validation Error Alert */}
+              {regError ? (
+                <View style={styles.errorAlertContainer}>
+                  <Ionicons name="alert-circle" size={18} color={COLORS.error} style={{ marginRight: 8 }} />
+                  <Text style={styles.errorAlertText}>{regError}</Text>
+                </View>
+              ) : null}
+
+              {/* Form Fields */}
+              <View style={styles.authForm}>
+                {/* Full Name */}
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Full Name</Text>
+                  <View
+                    style={[
+                      styles.inputFieldBox,
+                      focusedField === 'regName' && styles.inputFieldBoxFocused,
+                    ]}
+                  >
+                    <Ionicons
+                      name="person-outline"
+                      size={20}
+                      color={focusedField === 'regName' ? COLORS.primary : COLORS.textSecondary}
+                    />
+                    <TextInput
+                      value={regName}
+                      onChangeText={(val) => {
+                        setRegName(val);
+                        if (regError) setRegError('');
+                      }}
+                      onFocus={() => setFocusedField('regName')}
+                      onBlur={() => setFocusedField('')}
+                      placeholder="e.g. Alex Smith"
+                      placeholderTextColor="#9CA3AF"
+                      autoCapitalize="words"
+                      style={styles.authInput}
+                    />
+                  </View>
+                </View>
+
+                {/* Email Address */}
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Email Address</Text>
+                  <View
+                    style={[
+                      styles.inputFieldBox,
+                      focusedField === 'regEmail' && styles.inputFieldBoxFocused,
+                    ]}
+                  >
+                    <Ionicons
+                      name="mail-outline"
+                      size={20}
+                      color={focusedField === 'regEmail' ? COLORS.primary : COLORS.textSecondary}
+                    />
+                    <TextInput
+                      value={regEmail}
+                      onChangeText={(val) => {
+                        setRegEmail(val);
+                        if (regError) setRegError('');
+                      }}
+                      onFocus={() => setFocusedField('regEmail')}
+                      onBlur={() => setFocusedField('')}
+                      placeholder="name@example.com"
+                      placeholderTextColor="#9CA3AF"
+                      keyboardType="email-address"
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      style={styles.authInput}
+                    />
+                  </View>
+                </View>
+
+                {/* Password */}
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Password</Text>
+                  <View
+                    style={[
+                      styles.inputFieldBox,
+                      focusedField === 'regPassword' && styles.inputFieldBoxFocused,
+                    ]}
+                  >
+                    <Ionicons
+                      name="lock-closed-outline"
+                      size={20}
+                      color={focusedField === 'regPassword' ? COLORS.primary : COLORS.textSecondary}
+                    />
+                    <TextInput
+                      value={regPassword}
+                      onChangeText={(val) => {
+                        setRegPassword(val);
+                        if (regError) setRegError('');
+                      }}
+                      onFocus={() => setFocusedField('regPassword')}
+                      onBlur={() => setFocusedField('')}
+                      placeholder="Min. 8 characters"
+                      placeholderTextColor="#9CA3AF"
+                      secureTextEntry={!showRegPassword}
+                      autoCapitalize="none"
+                      style={styles.authInput}
+                    />
+                    <TouchableOpacity
+                      onPress={() => setShowRegPassword(!showRegPassword)}
+                      activeOpacity={0.7}
+                      style={styles.passwordToggle}
+                    >
+                      <Ionicons
+                        name={showRegPassword ? 'eye-off-outline' : 'eye-outline'}
+                        size={20}
+                        color={COLORS.textSecondary}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* Confirm Password */}
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Confirm Password</Text>
+                  <View
+                    style={[
+                      styles.inputFieldBox,
+                      focusedField === 'regConfirmPassword' && styles.inputFieldBoxFocused,
+                    ]}
+                  >
+                    <Ionicons
+                      name="lock-closed-outline"
+                      size={20}
+                      color={focusedField === 'regConfirmPassword' ? COLORS.primary : COLORS.textSecondary}
+                    />
+                    <TextInput
+                      value={regConfirmPassword}
+                      onChangeText={(val) => {
+                        setRegConfirmPassword(val);
+                        if (regError) setRegError('');
+                      }}
+                      onFocus={() => setFocusedField('regConfirmPassword')}
+                      onBlur={() => setFocusedField('')}
+                      placeholder="Re-enter your password"
+                      placeholderTextColor="#9CA3AF"
+                      secureTextEntry={!showRegConfirmPassword}
+                      autoCapitalize="none"
+                      style={styles.authInput}
+                    />
+                    <TouchableOpacity
+                      onPress={() => setShowRegConfirmPassword(!showRegConfirmPassword)}
+                      activeOpacity={0.7}
+                      style={styles.passwordToggle}
+                    >
+                      <Ionicons
+                        name={showRegConfirmPassword ? 'eye-off-outline' : 'eye-outline'}
+                        size={20}
+                        color={COLORS.textSecondary}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {/* Full-Width Orange Sign Up Button */}
+                <TouchableOpacity
+                  activeOpacity={0.88}
+                  style={[styles.primaryButtonShadow, { marginTop: 12 }]}
+                  onPress={handleRegister}
+                  disabled={authBusy}
+                >
+                  <LinearGradient
+                    colors={[COLORS.primary, COLORS.secondary]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.primaryGradientButton}
+                  >
+                    {authBusy ? (
+                      <ActivityIndicator size="small" color="#FFFFFF" />
+                    ) : (
+                      <Text style={styles.primaryButtonText}>Sign Up</Text>
+                    )}
+                  </LinearGradient>
+                </TouchableOpacity>
+              </View>
+
+              {/* Bottom Link to Login */}
+              <View style={[styles.footerLinkRow, styles.authFooterLinkRow]}>
+                <Text style={styles.footerLabel}>Already have an account? </Text>
+                <TouchableOpacity
+                  onPress={() => {
+                    setRegError('');
+                    setScreen('login');
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.footerLinkBold}>Sign In</Text>
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
+          )}
+
+          {/* SCREEN 4: ONBOARDING PROFILE SETUP */}
+          {screen === 'onboard' && (
+            <ScrollView contentContainerStyle={{ padding: 24, flexGrow: 1 }} keyboardShouldPersistTaps="handled">
+              <TouchableOpacity onPress={() => setScreen('login')} style={{ flexDirection: 'row', alignItems: 'center', marginBottom: 15 }}>
+                <Ionicons name="arrow-back" size={20} color={navy} />
+                <Txt size={14} color={muted} style={{ marginLeft: 6 }}>Back to Login</Txt>
+              </TouchableOpacity>
+              <View style={{ alignItems: 'center', paddingVertical: 18 }}>
+                <Txt size={26} bold style={{ textAlign: 'center' }}>Your language{'\n'}journey starts here</Txt>
+                <Txt color={muted} style={{ textAlign: 'center', marginTop: 10, lineHeight: 20 }}>
+                  Tell us about yourself to match you with native speakers worldwide.
                 </Txt>
               </View>
-            ) : (
-              messages
-                .filter((m) => (m.from === selected.id && m.to === currentUser.id) || (m.from === currentUser.id && m.to === selected.id))
-                .map((m) => (
-                  <View
-                    key={m.id}
-                    style={{
-                      alignSelf: m.from === currentUser.id ? 'flex-end' : 'flex-start',
-                      maxWidth: '82%',
-                      marginBottom: 12,
-                      backgroundColor: m.from === currentUser.id ? orangeLight : light,
-                      borderColor: m.from === currentUser.id ? '#FFD8C9' : '#ECEFF3',
-                      borderWidth: 1,
-                      padding: 14,
-                      borderRadius: 16,
-                    }}
-                  >
-                    <Txt color={navy} size={14}>{m.text}</Txt>
-                    <Txt color={muted} size={10} style={{ marginTop: 5, alignSelf: 'flex-end' }}>
-                      {new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </Txt>
-                  </View>
-                ))
-            )}
-          </ScrollView>
-
-          <View style={styles.chatInputRow}>
-            <TextInput
-              placeholder="Type a message..."
-              placeholderTextColor="#9CA3AF"
-              value={draft}
-              onChangeText={setDraft}
-              style={styles.chatInput}
-            />
-            <TouchableOpacity onPress={send} style={styles.sendButton}>
-              <Ionicons name="send" color="#fff" size={18} />
-            </TouchableOpacity>
-          </View>
-        </>
-      )}
-
-      {/* BOTTOM TAB BAR NAVIGATION */}
-      {isMainTabScreen && (
-        <View style={styles.tabBar}>
-          {tabItems.map(([key, icon, label]) => {
-            const active = screen === key || (key === 'home' && screen === 'dashboard');
-            return (
-              <TouchableOpacity
-                key={key}
-                onPress={() => setScreen(key)}
-                style={styles.tabItem}
-                activeOpacity={0.7}
-              >
-                <Ionicons name={icon} size={22} color={active ? orange : '#94A3B8'} />
-                <Txt size={11} color={active ? orange : '#94A3B8'} bold={active}>
-                  {label}
-                </Txt>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      )}
-
-      {/* MODAL 1: COMMUNITY SAFETY & CONSENT (Section 5.1 & 12) */}
-      <Modal visible={showSafetyModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <View style={{ alignItems: 'center', marginBottom: 16 }}>
-              <Ionicons name="shield-checkmark" size={48} color={orange} />
-              <Txt size={18} bold style={{ marginTop: 8 }}>Community Safety & Anonymity</Txt>
-              <Txt size={12} color={muted} style={{ textAlign: 'center', marginTop: 4 }}>
-                BYTALK Standard Terms & Respectful Communication
-              </Txt>
-            </View>
-
-            <ScrollView style={{ maxHeight: 220, marginBottom: 16 }}>
-              <Txt size={13} style={{ lineHeight: 18, marginBottom: 10 }}>
-                • <Text style={{ fontWeight: 'bold' }}>Privacy Protected:</Text> Your real phone number, email, and exact location are never disclosed to call partners.
-              </Txt>
-              <Txt size={13} style={{ lineHeight: 18, marginBottom: 10 }}>
-                • <Text style={{ fontWeight: 'bold' }}>Zero Harassment Policy:</Text> Inappropriate language, abuse, or unsolicited solicitation results in immediate permanent account termination.
-              </Txt>
-              <Txt size={13} style={{ lineHeight: 18, marginBottom: 10 }}>
-                • <Text style={{ fontWeight: 'bold' }}>Microphone Consent:</Text> Audio is transmitted only when you voluntarily join active calls or room stages.
-              </Txt>
-              <Txt size={13} style={{ lineHeight: 18 }}>
-                • <Text style={{ fontWeight: 'bold' }}>Instant Blocking:</Text> You can leave any session and block rematching at any time.
-              </Txt>
+              <Field label="Your name" value={name} setValue={setName} placeholder="e.g. Alex Smith" />
+              <SearchSelect
+                label="My native language"
+                value={nativeLanguage}
+                options={LANGUAGES}
+                onSelect={setNativeLanguage}
+                placeholder="Choose a language"
+              />
+              <SearchSelect
+                label="I want to learn"
+                value={learningLanguage}
+                options={LANGUAGES}
+                onSelect={setLearningLanguage}
+                placeholder="Choose a language"
+              />
+              <SearchSelect
+                label="I am from"
+                value={country}
+                options={COUNTRY_OPTIONS}
+                onSelect={setCountry}
+                placeholder="Choose a country"
+              />
+              <Btn label="Next  →" onPress={() => setScreen('level')} style={{ marginTop: 15 }} />
             </ScrollView>
+          )}
 
-            <Btn label="I Understand & Agree" onPress={() => setShowSafetyModal(false)} />
-          </View>
-        </View>
-      </Modal>
-
-      {/* MODAL 2: CREATE LIVE AUDIO ROOM (Section 8) */}
-      <Modal visible={showCreateRoomModal} transparent animationType="fade">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <Txt size={18} bold>Open New Audio Room</Txt>
-              <TouchableOpacity onPress={() => setShowCreateRoomModal(false)}>
-                <Ionicons name="close" size={24} color={muted} />
-              </TouchableOpacity>
-            </View>
-
-            <Field label="Room Title" value={newRoomName} setValue={setNewRoomName} placeholder="e.g. Free Speaking Practice" />
-
-            <Txt size={13} bold style={{ marginBottom: 6 }}>Topic Category</Txt>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 16 }}>
-              {['Daily English', 'Interviews', 'IELTS Practice', 'Travel', 'Free Conversation'].map((cat) => (
+          {/* SCREEN 5: PROFICIENCY LEVEL */}
+          {screen === 'level' && (
+            <ScrollView contentContainerStyle={{ padding: 22 }} keyboardShouldPersistTaps="handled">
+              <Header
+                title="Choose your level"
+                subtitle="Select your current proficiency so we can find the best partners for you."
+                onBack={() => setScreen('onboard')}
+              />
+              {[
+                ['🌱', 'Beginner', 'I know a few basic words and phrases.'],
+                ['🍃', 'Elementary', 'I can have simple conversations.'],
+                ['📊', 'Intermediate', 'I can communicate in daily situations.'],
+                ['📘', 'Upper Intermediate', 'I can discuss familiar topics with confidence.'],
+                ['🎓', 'Advanced', 'I can express myself fluently.'],
+                ['👑', 'Proficient', 'I can communicate like a native.'],
+              ].map(([emoji, n, desc]) => (
                 <TouchableOpacity
-                  key={cat}
-                  onPress={() => setNewRoomTopic(cat)}
+                  key={n}
+                  onPress={() => setLevel(n)}
                   style={{
-                    backgroundColor: newRoomTopic === cat ? orange : light,
-                    paddingHorizontal: 12,
-                    paddingVertical: 6,
-                    borderRadius: 16,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    padding: 15,
+                    marginBottom: 11,
+                    borderWidth: 1.5,
+                    borderColor: level === n ? orange : border,
+                    borderRadius: 14,
+                    backgroundColor: level === n ? COLORS.softSurface : '#fff',
                   }}
                 >
-                  <Txt size={11} color={newRoomTopic === cat ? '#fff' : navy} bold={newRoomTopic === cat}>
-                    {cat}
+                  <Txt size={28}>{emoji}</Txt>
+                  <View style={{ flex: 1, marginLeft: 15 }}>
+                    <Txt bold size={15}>{n}</Txt>
+                    <Txt size={12} color={muted} style={{ marginTop: 2 }}>{desc}</Txt>
+                  </View>
+                  <Ionicons
+                    name={level === n ? 'radio-button-on' : 'radio-button-off'}
+                    color={level === n ? orange : '#aab3c0'}
+                    size={22}
+                  />
+                </TouchableOpacity>
+              ))}
+              <Btn label={busy ? 'Saving...' : 'Continue  →'} onPress={() => saveProfile('discover')} style={{ marginTop: 8 }} />
+            </ScrollView>
+          )}
+
+          {/* SCREEN 6: DISCOVER PARTNERS */}
+          {screen === 'discover' && (
+            <>
+              <Header title="Find your partner" subtitle="Meet people from around the world and practice together." />
+              <View style={styles.searchBar}>
+                <Ionicons name="search" size={19} color={muted} />
+                <TextInput
+                  placeholder="Search by name, country, language..."
+                  placeholderTextColor="#9CA3AF"
+                  value={search}
+                  onChangeText={setSearch}
+                  style={{ flex: 1, padding: 12, color: navy, fontSize: 14 }}
+                />
+              </View>
+              <ScrollView
+                contentContainerStyle={{ padding: 22, flexGrow: 1 }}
+                refreshControl={
+                  <RefreshControl
+                    refreshing={discoverRefreshing}
+                    onRefresh={() => loadDiscoverUsers(true)}
+                    tintColor={orange}
+                    colors={[orange]}
+                  />
+                }
+              >
+                {discoverError ? (
+                  <View style={styles.discoverMessage}>
+                    <Txt color={COLORS.error} size={13} style={{ textAlign: 'center' }}>{discoverError}</Txt>
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      accessibilityLabel="Retry loading registered users"
+                      onPress={() => loadDiscoverUsers(true)}
+                      style={styles.discoverRetry}
+                    >
+                      <Ionicons name="refresh" size={16} color={orange} />
+                      <Txt color={orange} size={13} bold>Retry</Txt>
+                    </TouchableOpacity>
+                  </View>
+                ) : null}
+                {discoverLoading && partners.length === 0 ? (
+                  <View style={styles.discoverMessage}>
+                    <ActivityIndicator color={orange} />
+                    <Txt size={13} color={muted} style={{ marginTop: 10 }}>Finding registered users…</Txt>
+                  </View>
+                ) : null}
+                {!discoverLoading && !discoverError && partners.length === 0 ? (
+                  <View style={styles.discoverMessage}>
+                    <Ionicons name="people-outline" size={34} color={muted} />
+                    <Txt size={14} color={muted} style={{ marginTop: 10, textAlign: 'center' }}>
+                      No other registered users yet. Pull down to refresh.
+                    </Txt>
+                  </View>
+                ) : null}
+                {!discoverLoading && !discoverError && partners.length > 0 && filteredPartners.length === 0 ? (
+                  <View style={styles.discoverMessage}>
+                    <Txt size={14} color={muted} style={{ textAlign: 'center' }}>No users match “{search}”. Try a different search.</Txt>
+                  </View>
+                ) : null}
+                {filteredPartners.map((p) => (
+                    <View key={p.id} style={styles.partnerCard}>
+                      <View style={styles.partnerInfoRow}>
+                        <View style={[styles.avatarCircle, { backgroundColor: '#FFE0D3' }]}>
+                          {p.avatarUrl ? (
+                            <Image
+                              source={{ uri: p.avatarUrl }}
+                              accessibilityLabel={`${p.displayName || p.name} profile photo`}
+                              style={styles.partnerAvatarImage}
+                            />
+                          ) : (
+                            <Txt size={20} bold color={orange}>{(p.displayName || p.name || '?').trim().charAt(0).toUpperCase()}</Txt>
+                          )}
+                        </View>
+                        <View style={{ flex: 1, marginLeft: 12 }}>
+                          <Txt bold size={15}>
+                            {p.displayName || p.name}  <Txt size={12} color={muted}>{p.country}</Txt>
+                          </Txt>
+                          <Txt size={11} color={muted} style={{ marginTop: 2 }}>
+                            Speaks: {p.nativeLanguage}, {p.learningLanguage}
+                          </Txt>
+                          <Txt size={11} color={COLORS.primary} style={{ marginTop: 2, fontWeight: '600' }}>
+                            {p.level}  ·  {p.learningLanguage}
+                          </Txt>
+                          <Txt size={10} color={p.online ? COLORS.success : muted} style={{ marginTop: 3 }}>
+                            {p.online ? '● Online' : '● Offline'}
+                          </Txt>
+                        </View>
+                      </View>
+                      <View style={styles.partnerActions}>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          accessibilityLabel={`Chat with ${p.name}`}
+                          onPress={() => {
+                            openConversation(p);
+                          }}
+                          style={[styles.chatButtonOutline, styles.partnerAction]}
+                        >
+                          <Ionicons name="chatbubble-ellipses-outline" size={17} color={orange} />
+                          <Txt color={orange} size={12} bold>Start chat</Txt>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          accessibilityLabel={`Voice call ${p.name}`}
+                          onPress={() => startCall(p, 'audio')}
+                          disabled={Boolean(callStarting)}
+                          style={styles.partnerAction}
+                        >
+                          {callStarting?.partnerId === p.id && callStarting.type === 'audio' ? (
+                            <ActivityIndicator size="small" color={orange} />
+                          ) : (
+                            <>
+                              <Ionicons name="call-outline" size={17} color={orange} />
+                              <Txt color={orange} size={12} bold>Voice</Txt>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          accessibilityRole="button"
+                          accessibilityLabel={`Video call ${p.name}`}
+                          onPress={() => startCall(p, 'video')}
+                          disabled={Boolean(callStarting)}
+                          style={styles.partnerAction}
+                        >
+                          {callStarting?.partnerId === p.id && callStarting.type === 'video' ? (
+                            <ActivityIndicator size="small" color={orange} />
+                          ) : (
+                            <>
+                              <Ionicons name="videocam-outline" size={18} color={orange} />
+                              <Txt color={orange} size={12} bold>Video</Txt>
+                            </>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ))}
+              </ScrollView>
+            </>
+          )}
+
+          {screen === 'messages' && (
+            <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+              <Header title="Messages" subtitle="Your latest conversations" />
+              {!conversations.length ? (
+                <View style={{ padding: 24, alignItems: 'center' }}>
+                  <Txt color={muted}>No conversations yet. Start a chat from Discover.</Txt>
+                </View>
+              ) : conversations.map((conversation) => {
+                const partner = conversation.user;
+                const latest = conversation.latestMessage;
+                return (
+                  <TouchableOpacity
+                    key={partner.id}
+                    onPress={() => openConversation(partner)}
+                    style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#EEF0F4' }}
+                  >
+                    <View style={[styles.avatarCircle, { backgroundColor: '#FFE0D3' }]}>
+                      {partner.avatarUrl ? (
+                        <Image source={{ uri: partner.avatarUrl }} style={styles.partnerAvatarImage} />
+                      ) : (
+                        <Txt size={19} bold color={orange}>{(partner.displayName || partner.name || '?').charAt(0).toUpperCase()}</Txt>
+                      )}
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 12 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Txt bold size={15}>{partner.displayName || partner.name}</Txt>
+                        <Txt size={10} color={muted}>{latest?.at ? new Date(latest.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</Txt>
+                      </View>
+                      <Txt size={12} color={muted} numberOfLines={1} style={{ marginTop: 4 }}>{latest?.text || ''}</Txt>
+                    </View>
+                    {conversation.unreadCount > 0 && (
+                      <View style={{ minWidth: 20, height: 20, borderRadius: 10, backgroundColor: COLORS.error, alignItems: 'center', justifyContent: 'center', marginLeft: 8 }}>
+                        <Txt color="#fff" size={10} bold>{conversation.unreadCount}</Txt>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          )}
+
+          {/* SCREEN 7: CHAT */}
+          {screen === 'chat' && (
+            <>
+              <TouchableOpacity
+                onPress={() => setScreen('messages')}
+                style={styles.chatHeader}
+              >
+                <Ionicons name="arrow-back" size={22} color={navy} />
+                <View>
+                  <Txt size={17} bold>{selected.name}  <Txt size={12} color={selected.online ? '#18b576' : muted}>● {selected.online ? 'Online' : 'Offline'}</Txt></Txt>
+                  <Txt size={11} color={muted}>{selected.country} · {selected.learningLanguage}</Txt>
+                </View>
+              </TouchableOpacity>
+              {chatError ? (
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel="Return to Discover"
+                  onPress={() => setScreen('discover')}
+                  style={{ padding: 12, backgroundColor: '#FFF1F0' }}
+                >
+                  <Txt color={COLORS.error} size={12}>{chatError}  Return to Discover and reopen this conversation to retry.</Txt>
+                </TouchableOpacity>
+              ) : null}
+              {typing && (
+                <Txt size={11} color={muted} style={{ paddingHorizontal: 18, paddingTop: 8 }}>{selected.name} is typing...</Txt>
+              )}
+              <ScrollView contentContainerStyle={{ padding: 16, flexGrow: 1, justifyContent: 'flex-end' }}>
+                {messageLoading && <ActivityIndicator color={orange} style={{ margin: 18 }} />}
+                {!messageLoading && hasOlderMessages && (
+                  <TouchableOpacity onPress={loadEarlierMessages} disabled={loadingOlderMessages} style={{ alignSelf: 'center', padding: 10 }}>
+                    {loadingOlderMessages
+                      ? <ActivityIndicator color={orange} />
+                      : <Txt size={12} color={orange} bold>Load earlier messages</Txt>}
+                  </TouchableOpacity>
+                )}
+                {!messageLoading && messages
+                  .filter((m) => (m.from === selected.id && m.to === userId) || (m.from === userId && m.to === selected.id))
+                  .map((m) => (
+                    <View
+                      key={m.id}
+                      style={{
+                        alignSelf: m.from === userId ? 'flex-end' : 'flex-start',
+                        maxWidth: '82%',
+                        marginBottom: 12,
+                        backgroundColor: m.from === userId ? COLORS.softSurface : light,
+                        borderColor: m.from === userId ? '#FFD8C9' : '#ECEFF3',
+                        borderWidth: 1,
+                        padding: 14,
+                        borderRadius: 16,
+                      }}
+                    >
+                      <Txt color={muted} size={10} style={{ marginBottom: 4 }}>{m.from === userId ? 'You' : selected.name}</Txt>
+                      <Txt color={navy} size={14}>{m.text}</Txt>
+                      <Txt color={muted} size={10} style={{ marginTop: 5, alignSelf: 'flex-end' }}>
+                        {new Date(m.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {m.from === userId ? ` · ${m.readAt ? 'Read' : m.deliveredAt ? 'Delivered' : 'Sent'}` : ''}
+                      </Txt>
+                    </View>
+                  ))}
+              </ScrollView>
+              <View style={styles.chatInputRow}>
+                <TextInput
+                  placeholder="Type a message..."
+                  placeholderTextColor="#9CA3AF"
+                  value={draft}
+                  onChangeText={updateDraft}
+                  style={styles.chatInput}
+                />
+                <TouchableOpacity onPress={send} style={styles.sendButton}>
+                  <Ionicons name="send" color="#fff" size={18} />
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
+
+          {screen === 'call' && call && (
+            <View style={styles.callScreen}>
+              <View style={styles.callHeader}>
+                <TouchableOpacity
+                  accessibilityRole="button"
+                  accessibilityLabel="End call and return"
+                  onPress={endCall}
+                  style={styles.callBackButton}
+                >
+                  <Ionicons name="chevron-down" size={22} color="#FFFFFF" />
+                </TouchableOpacity>
+                <View style={{ flex: 1 }}>
+                  <Txt color="#FFFFFF" size={17} bold>{call.peer.name}</Txt>
+                  <Txt color="#D8D8E2" size={12}>{call.type === 'video' ? 'Video call' : 'Voice call'}</Txt>
+                </View>
+                <Txt color="#D8D8E2" size={12}>
+                  {call.status === 'Connected'
+                    ? `${String(Math.floor(callDuration / 60)).padStart(2, '0')}:${String(callDuration % 60).padStart(2, '0')}`
+                    : call.status}
+                </Txt>
+              </View>
+
+              {call.type === 'video' ? (
+                <View style={styles.callVideoStage}>
+                  <CallVideo
+                    stream={remoteStream}
+                    label={call.status === 'Connected' ? 'Waiting for remote video…' : 'Connecting video…'}
+                    style={styles.remoteVideo}
+                  />
+                  {localStream?.getVideoTracks().length > 0 ? (
+                    <CallVideo
+                      stream={localStream}
+                      label="Camera off"
+                      mirror
+                      style={styles.localVideo}
+                    />
+                  ) : (
+                    <View style={styles.localVideoFallback}>
+                      <Txt color="#FFFFFF" size={10}>Camera unavailable</Txt>
+                    </View>
+                  )}
+                  {call.status === 'Connected' && remoteStream && !remoteStream.getVideoTracks().length ? (
+                    <View style={styles.videoFallbackNotice}>
+                      <Txt color="#FFFFFF" size={12}>The other person has no camera available. Audio is still connected.</Txt>
+                    </View>
+                  ) : null}
+                </View>
+              ) : (
+                <View style={styles.voiceCallAvatarArea}>
+                  <CallAudio stream={remoteStream} />
+                  <View style={styles.callAvatar}>
+                    <Txt size={48} bold color="#FFFFFF">{call.peer.name?.charAt(0)?.toUpperCase() || '?'}</Txt>
+                  </View>
+                  <Txt color="#FFFFFF" size={22} bold style={{ marginTop: 16 }}>{call.peer.name}</Txt>
+                </View>
+              )}
+
+              <View style={styles.callStatusArea}>
+                <Txt color="#FFFFFF" size={15} bold>{call.status}</Txt>
+                {callNotice ? <Txt color="#FFD4C8" size={12} style={{ textAlign: 'center', marginTop: 8 }}>{callNotice}</Txt> : null}
+              </View>
+
+              {call.direction === 'incoming' && call.status === 'Ringing' ? (
+                <View style={styles.incomingCallActions}>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel="Decline incoming call"
+                    onPress={rejectCall}
+                    style={[styles.callControl, styles.declineControl]}
+                  >
+                    <Ionicons name="call" size={23} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
+                    <Txt color="#FFFFFF" size={11}>Decline</Txt>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel="Accept incoming call"
+                    onPress={acceptCall}
+                    style={[styles.callControl, styles.acceptControl]}
+                  >
+                    <Ionicons name={call.type === 'video' ? 'videocam' : 'call'} size={23} color="#FFFFFF" />
+                    <Txt color="#FFFFFF" size={11}>Accept</Txt>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.callControls}>
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel={muted ? 'Unmute microphone' : 'Mute microphone'}
+                    onPress={() => {
+                      const nextMuted = !muted;
+                      localStreamRef.current?.getAudioTracks().forEach((track) => { track.enabled = !nextMuted; });
+                      setMuted(nextMuted);
+                    }}
+                    style={[styles.callControl, muted && styles.callControlActive]}
+                  >
+                    <Ionicons name={muted ? 'mic-off' : 'mic'} size={21} color="#FFFFFF" />
+                    <Txt color="#FFFFFF" size={10}>{muted ? 'Unmute' : 'Mute'}</Txt>
+                  </TouchableOpacity>
+                  {Platform.OS !== 'web' && (
+                    <TouchableOpacity
+                      accessibilityRole="button"
+                      accessibilityLabel={speakerEnabled ? 'Use earpiece' : 'Use speaker'}
+                      onPress={() => {
+                        try {
+                          const nextSpeaker = !speakerEnabled;
+                          setAudioRoute(nextSpeaker);
+                          setSpeakerEnabled(nextSpeaker);
+                        } catch (error) {
+                          setCallNotice(error.message || 'Speaker control is unavailable.');
+                        }
+                      }}
+                      style={[styles.callControl, speakerEnabled && styles.callControlActive]}
+                    >
+                      <Ionicons name={speakerEnabled ? 'volume-high' : 'volume-medium'} size={21} color="#FFFFFF" />
+                      <Txt color="#FFFFFF" size={10}>{speakerEnabled ? 'Speaker' : 'Earpiece'}</Txt>
+                    </TouchableOpacity>
+                  )}
+                  {call.type === 'video' && (
+                    <>
+                      <TouchableOpacity
+                        accessibilityRole="button"
+                        accessibilityLabel={cameraEnabled ? 'Turn camera off' : 'Turn camera on'}
+                        onPress={() => {
+                          const nextEnabled = !cameraEnabled;
+                          localStreamRef.current?.getVideoTracks().forEach((track) => { track.enabled = nextEnabled; });
+                          setCameraEnabled(nextEnabled);
+                        }}
+                        disabled={!localStream?.getVideoTracks().length}
+                        style={[styles.callControl, !cameraEnabled && styles.callControlActive, !localStream?.getVideoTracks().length && { opacity: 0.45 }]}
+                      >
+                        <Ionicons name={cameraEnabled ? 'videocam' : 'videocam-off'} size={21} color="#FFFFFF" />
+                        <Txt color="#FFFFFF" size={10}>{cameraEnabled ? 'Camera' : 'Camera off'}</Txt>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        accessibilityRole="button"
+                        accessibilityLabel="Switch camera"
+                        onPress={() => {
+                          try {
+                            switchCamera(localStreamRef.current, peerRef.current?.connection);
+                          } catch (error) {
+                            setCallNotice(error.message || 'Could not switch camera.');
+                          }
+                        }}
+                        disabled={!localStream?.getVideoTracks().length}
+                        style={[styles.callControl, !localStream?.getVideoTracks().length && { opacity: 0.45 }]}
+                      >
+                        <Ionicons name="camera-reverse-outline" size={21} color="#FFFFFF" />
+                        <Txt color="#FFFFFF" size={10}>Flip</Txt>
+                      </TouchableOpacity>
+                    </>
+                  )}
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel="End call"
+                    onPress={endCall}
+                    style={[styles.callControl, styles.declineControl]}
+                  >
+                    <Ionicons name="call" size={21} color="#FFFFFF" style={{ transform: [{ rotate: '135deg' }] }} />
+                    <Txt color="#FFFFFF" size={10}>End</Txt>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          )}
+
+          {/* SCREEN 8: LIVE SPEAKING ROOMS */}
+          {screen === 'rooms' && (
+            <>
+              <Header title="Live speaking rooms" subtitle="Join live audio rooms to practice with people around the world." />
+              {roomError ? (
+                <View style={{ marginHorizontal: 20, marginBottom: 12, padding: 12, borderRadius: 12, backgroundColor: '#FFF0ED' }}>
+                  <Txt color={COLORS.error} size={12}>{roomError}</Txt>
+                </View>
+              ) : null}
+              {activeRoom && (
+                <View style={{ marginHorizontal: 20, marginBottom: 16, padding: 16, borderRadius: 16, backgroundColor: '#FFF0E8', borderWidth: 1, borderColor: '#FFD8C9' }}>
+                  <Txt bold size={16}>Live in {activeRoom.name}</Txt>
+                  <Txt color={muted} size={12} style={{ marginTop: 4 }}>
+                    {roomParticipants.length} connected participant{roomParticipants.length === 1 ? '' : 's'}
                   </Txt>
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+                    <Btn label={roomMuted ? 'Unmute microphone' : 'Mute microphone'} outline onPress={toggleRoomMute} style={{ flex: 1 }} />
+                    <Btn label="Leave room" onPress={leaveRoom} style={{ flex: 1, backgroundColor: COLORS.error }} />
+                  </View>
+                </View>
+              )}
+              <ScrollView contentContainerStyle={{ paddingHorizontal: 20 }}>
+                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 18 }}>
+                  {['All', 'English', 'Travel', 'Culture', 'Study'].map((f) => (
+                    <TouchableOpacity
+                      key={f}
+                      onPress={() => setFilter(f)}
+                      style={{
+                        backgroundColor: filter === f ? orange : light,
+                        paddingHorizontal: 14,
+                        paddingVertical: 8,
+                        borderRadius: 20,
+                      }}
+                    >
+                      <Txt size={12} color={filter === f ? '#fff' : navy} bold={filter === f}>{f}</Txt>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+                {rooms
+                  .filter((r) => filter === 'All' || r.topic === filter)
+                  .map((room, i) => (
+                    <View key={room.id} style={styles.roomCard}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                        <View style={{ backgroundColor: ['#FFE3C9', '#CDE8FB', '#E1F5E5', '#E7DDFE'][i % 4], borderRadius: 12, padding: 12 }}>
+                          <Txt size={22}>{['🎙️', '✈️', '🎬', '💬'][i % 4]}</Txt>
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Txt bold size={15}>{room.name}</Txt>
+                          <Txt size={12} color={muted} style={{ marginTop: 2 }}>{room.level}</Txt>
+                        </View>
+                        <Txt size={11} color={room.mediaAvailable ? '#16ac64' : muted} bold>
+                          {room.mediaAvailable ? '● Live' : 'Unavailable'}
+                        </Txt>
+                      </View>
+                      <Txt size={12} color={muted} style={{ marginVertical: 14 }}>
+                        👥 {room.participants || 0} connected
+                      </Txt>
+                      <Btn
+                        label={roomStatus === 'connecting' ? 'Connecting...' : activeRoom?.id === room.id ? 'Joined' : 'Join room'}
+                        onPress={() => join(room)}
+                        disabled={!room.mediaAvailable || Boolean(activeRoom)}
+                        loading={roomStatus === 'connecting' && activeRoom?.id !== room.id}
+                      />
+                    </View>
+                  ))}
+              </ScrollView>
+            </>
+          )}
+
+          {/* SCREEN 9: LEARNING DASHBOARD */}
+          {screen === 'dashboard' && (
+            <ScrollView contentContainerStyle={{ padding: 22 }}>
+              <View style={{ alignItems: 'center', marginTop: 12, marginBottom: 20 }}>
+                <Txt size={52}>👨🏽‍💻</Txt>
+                <Txt size={20} bold style={{ marginTop: 6 }}>{name}</Txt>
+                <Txt color={muted} size={13}>Profile · {country}</Txt>
+              </View>
+              <View style={styles.statsCard}>
+                {[
+                  ['🔥', '12', 'day streak'],
+                  ['🕒', '180', 'speaking mins'],
+                  ['⭐', String(28 + vocab.length), 'new words'],
+                ].map(([emoji, n, label]) => (
+                  <View key={label} style={{ alignItems: 'center' }}>
+                    <Txt size={20}>{emoji} {n}</Txt>
+                    <Txt size={11} color={muted} style={{ marginTop: 4 }}>{label}</Txt>
+                  </View>
+                ))}
+              </View>
+              <Section title="Your progress">
+                <View style={{ backgroundColor: COLORS.lightBg, borderRadius: 15, padding: 18, borderColor: '#FFDDCF', borderWidth: 1 }}>
+                  <Txt size={20} bold color={orange}>75% speaking goal</Txt>
+                  <Txt size={13} color={muted} style={{ marginTop: 4 }}>150 / 200 minutes this week</Txt>
+                  <View style={{ marginTop: 14, height: 8, borderRadius: 8, backgroundColor: '#FFD6C7' }}>
+                    <View style={{ width: '75%', backgroundColor: orange, height: 8, borderRadius: 8 }} />
+                  </View>
+                </View>
+              </Section>
+              <Section title="Saved vocabulary">
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <TextInput
+                    value={word}
+                    onChangeText={setWord}
+                    placeholder="Add new vocabulary..."
+                    placeholderTextColor="#9CA3AF"
+                    style={{ flex: 1, backgroundColor: '#fff', borderRadius: 12, padding: 14, borderColor: border, borderWidth: 1 }}
+                  />
+                  <Btn label="Add" onPress={addWord} style={{ paddingHorizontal: 22 }} />
+                </View>
+                <Txt color={muted} size={13} style={{ marginTop: 12 }}>{vocab.length} words saved</Txt>
+                {vocab.map((v) => (
+                  <Txt key={v.id} style={{ paddingVertical: 4 }}>📖 {v.word}</Txt>
+                ))}
+              </Section>
+              <Section title="Call history">
+                {callHistoryError ? (
+                  <TouchableOpacity
+                    accessibilityRole="button"
+                    onPress={() => request('calls').then((history) => {
+                      setCallHistory(history);
+                      setCallHistoryError('');
+                    }).catch((error) => setCallHistoryError(error.message || 'Could not load call history.'))}
+                  >
+                    <Txt color={COLORS.error} size={12}>{callHistoryError}  Tap to retry.</Txt>
+                  </TouchableOpacity>
+                ) : null}
+                {callHistory.length === 0 ? (
+                  <Txt size={12} color={muted}>Your incoming, outgoing, missed, and ended calls will appear here.</Txt>
+                ) : callHistory.map((item) => {
+                  const outgoing = item.callerId === userId;
+                  const otherUserId = outgoing ? item.calleeId : item.callerId;
+                  const otherUser = partners.find((partner) => partner.id === otherUserId);
+                  const callStatus = item.status ? item.status.charAt(0).toUpperCase() + item.status.slice(1) : 'Ended';
+                  return (
+                    <View key={item.id} style={styles.callHistoryRow}>
+                      <Ionicons
+                        name={item.status === 'missed' ? 'call-outline' : outgoing ? 'arrow-up-outline' : 'arrow-down-outline'}
+                        size={19}
+                        color={item.status === 'missed' ? COLORS.error : orange}
+                      />
+                      <View style={{ flex: 1, marginLeft: 10 }}>
+                        <Txt size={13} bold>{otherUser?.name || 'BYTALK user'}</Txt>
+                        <Txt size={11} color={muted}>
+                          {outgoing ? 'Outgoing' : 'Incoming'} {item.type === 'video' ? 'video' : 'voice'} · {callStatus}
+                          {item.durationSeconds > 0 ? ` · ${Math.floor(item.durationSeconds / 60)}:${String(item.durationSeconds % 60).padStart(2, '0')}` : ''}
+                        </Txt>
+                      </View>
+                      <Txt size={10} color={muted}>
+                        {item.createdAt ? new Date(item.createdAt).toLocaleDateString() : ''}
+                      </Txt>
+                    </View>
+                  );
+                })}
+              </Section>
+              <Btn label="Update my level" outline onPress={() => setScreen('level')} style={{ marginBottom: 12 }} />
+              <Btn label="Log Out / Sign Out" outline onPress={handleLogout} style={{ marginBottom: 12 }} />
+              <Btn label="Back to Welcome Screen" outline onPress={() => setScreen('welcome')} />
+            </ScrollView>
+          )}
+
+          {/* BOTTOM TAB BAR (ONLY ON MAIN LOGGED-IN SCREENS) */}
+          {!['welcome', 'login', 'register', 'onboard', 'level', 'call'].includes(screen) && (
+            <View style={styles.tabBar}>
+              {tabItems.map(([id, icon, label]) => (
+                <TouchableOpacity key={id} onPress={() => {
+                  if (id === 'chat') requestNotificationPermission();
+                  setScreen(id === 'chat' ? 'messages' : id);
+                }} style={styles.tabItem}>
+                  <Ionicons name={icon} size={22} color={screen === id || (id === 'chat' && screen === 'messages') ? orange : '#98a3b3'} />
+                  <Txt size={10} color={screen === id || (id === 'chat' && screen === 'messages') ? orange : muted} bold={screen === id || (id === 'chat' && screen === 'messages')}>{label}</Txt>
+                  {id === 'chat' && Object.values(unreadByUser).reduce((sum, count) => sum + count, 0) > 0 && (
+                    <View style={{ position: 'absolute', top: -3, right: 12, minWidth: 16, height: 16, paddingHorizontal: 4, borderRadius: 8, backgroundColor: COLORS.error, alignItems: 'center', justifyContent: 'center' }}>
+                      <Txt color="#fff" size={9} bold>{Object.values(unreadByUser).reduce((sum, count) => sum + count, 0)}</Txt>
+                    </View>
+                  )}
                 </TouchableOpacity>
               ))}
             </View>
-
-            <Field label="Capacity (Max Listeners)" value={newRoomCapacity} setValue={setNewRoomCapacity} placeholder="50" />
-
-            <Btn label="Publish Room" onPress={handleCreateRoom} />
-          </View>
-        </View>
-      </Modal>
-
-      {/* MODAL 3: REFERRAL PROGRAMME (Section 15) */}
-      <Modal visible={showReferralModal} transparent animationType="slide">
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContainer}>
-            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-              <Txt size={18} bold>Refer & Learn Together</Txt>
-              <TouchableOpacity onPress={() => setShowReferralModal(false)}>
-                <Ionicons name="close" size={24} color={muted} />
-              </TouchableOpacity>
-            </View>
-
-            <View style={{ alignItems: 'center', marginVertical: 12 }}>
-              <Txt size={40}>🎁</Txt>
-              <Txt size={14} color={muted} style={{ textAlign: 'center', marginTop: 8 }}>
-                Share your invite code with friends to unlock vocabulary boosters and track practice goals together.
-              </Txt>
-              <View style={{ backgroundColor: orangeLight, paddingVertical: 12, paddingHorizontal: 24, borderRadius: 12, marginTop: 14, borderWidth: 1, borderColor: '#FFD6C7' }}>
-                <Txt size={18} bold color={orange}>{currentUser.referralCode || 'BYTALK-INVITE'}</Txt>
-              </View>
-              <Txt size={11} color={muted} style={{ marginTop: 6 }}>{currentUser.referredCount || 0} friends joined</Txt>
-            </View>
-
-            <View style={{ marginTop: 12, marginBottom: 16 }}>
-              <Txt size={12} bold style={{ marginBottom: 6 }}>Have a friend's referral code?</Txt>
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <TextInput
-                  placeholder="Enter code (e.g. BYTALK-PAVAN)"
-                  value={inputReferralCode}
-                  onChangeText={setInputReferralCode}
-                  style={{ flex: 1, backgroundColor: light, borderRadius: 12, padding: 12, borderWidth: 1, borderColor: border }}
-                />
-                <TouchableOpacity
-                  onPress={handleClaimReferral}
-                  style={{ backgroundColor: orange, paddingHorizontal: 16, borderRadius: 12, justifyContent: 'center' }}
-                >
-                  <Txt color="#fff" bold size={13}>Claim</Txt>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            <Btn label="Done" onPress={() => setShowReferralModal(false)} outline />
-          </View>
-        </View>
-      </Modal>
+          )}
+        </KeyboardAvoidingView>
+      </View>
     </SafeAreaView>
   );
 }
 
+const { width: windowWidth, height: screenHeight } = Dimensions.get('window');
+const isLargeScreen = windowWidth > 500;
+
 const styles = StyleSheet.create({
-  welcomeContainer: {
-    paddingHorizontal: 24,
-    paddingTop: 10,
-    paddingBottom: 28,
+  safeArea: {
+    flex: 1,
+    backgroundColor: isLargeScreen ? '#F4F5F8' : '#FFFFFF',
+    paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0,
+  },
+  webShell: {
+    flex: 1,
+    width: '100%',
+    maxWidth: 460,
+    alignSelf: 'center',
+    backgroundColor: '#FFFFFF',
+    ...(isLargeScreen
+      ? {
+          shadowColor: '#000',
+          shadowOffset: { width: 0, height: 4 },
+          shadowOpacity: 0.08,
+          shadowRadius: 16,
+          elevation: 5,
+          borderLeftWidth: 1,
+          borderRightWidth: 1,
+          borderColor: COLORS.border,
+        }
+      : {}),
+  },
+  topBar: {
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    minHeight: screenHeight - 60,
+    paddingHorizontal: 22,
+    paddingTop: 10,
+    paddingBottom: 6,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F2F4F7',
   },
-  topBrandHeader: {
-    alignItems: 'center',
-    marginTop: 6,
-  },
-  logoAndTitleRow: {
+  logoRowSmall: {
     flexDirection: 'row',
     alignItems: 'center',
   },
-  brandIcon: {
+  topLogoutButton: {
+    padding: 6,
+    borderRadius: 8,
+    backgroundColor: '#F8FAFC',
+  },
+  healthBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+
+  /* Welcome Screen Styles */
+  welcomeScrollContainer: {
+    flexGrow: 1,
+    justifyContent: 'space-between',
+    paddingHorizontal: 22,
+    paddingTop: Platform.OS === 'web' ? 18 : 12,
+    paddingBottom: Platform.OS === 'web' ? 22 : 16,
+    backgroundColor: COLORS.lightBg,
+  },
+  welcomeHeader: {
+    alignItems: 'center',
+    marginTop: 4,
+    marginBottom: 8,
+  },
+  brandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  logoIconLarge: {
     width: 38,
     height: 38,
     marginRight: 8,
@@ -1095,63 +2899,70 @@ const styles = StyleSheet.create({
   brandTitle: {
     fontSize: 27,
     fontWeight: '900',
-    color: '#1A1D2E',
+    color: COLORS.textPrimary,
     letterSpacing: -0.5,
   },
   brandSubtitle: {
-    fontSize: 12,
-    fontWeight: '500',
-    color: '#6B7280',
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
     marginTop: 3,
-    letterSpacing: 0.8,
+    letterSpacing: 0.5,
   },
   heroTextSection: {
     alignItems: 'center',
-    marginVertical: 10,
+    marginTop: 10,
+    marginBottom: 6,
+    paddingHorizontal: 4,
   },
   heroMainTitle: {
-    fontSize: 32,
+    fontSize: Math.min(31, Math.max(25, windowWidth * 0.075)),
     fontWeight: '800',
-    color: '#111827',
+    color: COLORS.textPrimary,
     textAlign: 'center',
-    lineHeight: 38,
+    lineHeight: Math.min(38, Math.max(31, windowWidth * 0.09)),
     letterSpacing: -0.5,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   heroSubText: {
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '400',
-    color: '#64748B',
+    color: COLORS.textSecondary,
     textAlign: 'center',
-    lineHeight: 22,
-    paddingHorizontal: 16,
+    lineHeight: 20,
+    paddingHorizontal: 4,
   },
   heroIllustrationContainer: {
+    width: '100%',
+    flexGrow: 1,
+    minHeight: 230,
+    maxHeight: Math.min(420, screenHeight * 0.48),
     alignItems: 'center',
     justifyContent: 'center',
-    marginVertical: 12,
-    minHeight: Math.min(270, screenHeight * 0.38),
+    marginTop: 4,
+    marginBottom: 8,
   },
   heroIllustrationImage: {
     width: '100%',
-    height: Math.min(270, screenHeight * 0.38),
+    height: '100%',
     maxWidth: 380,
+    alignSelf: 'center',
   },
   welcomeFooter: {
     width: '100%',
     alignItems: 'center',
-    paddingTop: 8,
+    paddingTop: 6,
   },
-  getStartedButtonShadow: {
+  primaryButtonShadow: {
     width: '100%',
     borderRadius: 28,
-    shadowColor: '#FF6847',
+    shadowColor: COLORS.primary,
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.35,
     shadowRadius: 16,
     elevation: 8,
   },
-  getStartedGradient: {
+  primaryGradientButton: {
     height: 56,
     borderRadius: 28,
     flexDirection: 'row',
@@ -1159,31 +2970,175 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 20,
   },
-  getStartedButtonText: {
+  primaryButtonText: {
     color: '#FFFFFF',
     fontSize: 17,
     fontWeight: '700',
     letterSpacing: 0.2,
   },
-  signInRow: {
+  footerLinkRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 18,
     paddingBottom: 4,
   },
-  signInLabel: {
+  footerLabel: {
     fontSize: 14,
-    color: '#64748B',
+    color: COLORS.textSecondary,
   },
-  signInLink: {
+  footerLinkBold: {
     fontSize: 14,
-    color: orange,
+    color: COLORS.primary,
     fontWeight: '700',
   },
+
+  /* Auth Screens Common Styles (Login & Registration) */
+  authScrollContainer: {
+    flexGrow: 1,
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 24,
+    backgroundColor: '#FFFFFF',
+  },
+  authTopNav: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+    marginTop: 4,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#F7F8FA',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  authBrandHeader: {
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  authBrandRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  authLogoIcon: {
+    width: 38,
+    height: 38,
+    marginBottom: 6,
+  },
+  authBrandTitle: {
+    fontSize: 24,
+    fontWeight: '900',
+    color: COLORS.textPrimary,
+    letterSpacing: -0.5,
+    lineHeight: 30,
+  },
+  authBrandSubtitle: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+    marginTop: 2,
+    letterSpacing: 0.8,
+  },
+  authHeadingBlock: {
+    marginBottom: 22,
+    alignItems: 'center',
+  },
+  authHeadingTitle: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: COLORS.textPrimary,
+    letterSpacing: -0.5,
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  authHeadingSubtitle: {
+    fontSize: 14,
+    fontWeight: '400',
+    color: COLORS.textSecondary,
+    lineHeight: 20,
+    textAlign: 'center',
+  },
+  errorAlertContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFF0ED',
+    borderColor: '#FECDCA',
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 16,
+  },
+  errorAlertText: {
+    flex: 1,
+    fontSize: 13,
+    color: COLORS.error,
+    fontWeight: '500',
+    lineHeight: 18,
+  },
+  authForm: {
+    width: '100%',
+  },
+  inputGroup: {
+    marginBottom: 13,
+  },
+  inputLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textPrimary,
+    marginBottom: 7,
+  },
+  inputFieldBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    height: 52,
+  },
+  inputFieldBoxFocused: {
+    borderColor: COLORS.primary,
+    backgroundColor: '#FFFDFB',
+  },
+  authInput: {
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 15,
+    color: COLORS.textPrimary,
+    paddingVertical: 0,
+  },
+  passwordToggle: {
+    padding: 6,
+  },
+  forgotPasswordRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginBottom: 16,
+    marginTop: -2,
+  },
+  forgotPasswordText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  authFooterLinkRow: {
+    marginTop: 'auto',
+    paddingTop: 28,
+    paddingBottom: 4,
+  },
+
+  /* Other Screens Styles */
   searchBar: {
     marginHorizontal: 22,
-    backgroundColor: light,
+    backgroundColor: '#F8FAFC',
     borderRadius: 14,
     paddingHorizontal: 15,
     flexDirection: 'row',
@@ -1192,11 +3147,51 @@ const styles = StyleSheet.create({
     borderColor: border,
   },
   partnerCard: {
-    flexDirection: 'row',
-    paddingVertical: 14,
+    paddingVertical: 16,
     borderBottomWidth: 1,
     borderColor: '#F1F3F7',
+  },
+  partnerInfoRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+  },
+  partnerAvatarImage: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+  },
+  discoverMessage: {
+    minHeight: 140,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  discoverRetry: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginTop: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 18,
+    backgroundColor: '#FFF0E8',
+  },
+  partnerActions: {
+    flexDirection: 'row',
+    gap: 7,
+    marginTop: 12,
+  },
+  partnerAction: {
+    flex: 1,
+    minHeight: 38,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingHorizontal: 5,
+    paddingVertical: 8,
+    borderRadius: 18,
+    backgroundColor: '#FFF7F2',
   },
   avatarCircle: {
     width: 52,
@@ -1213,12 +3208,130 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     backgroundColor: '#fff',
   },
+  callScreen: {
+    flex: 1,
+    backgroundColor: '#17172F',
+    paddingBottom: 24,
+  },
+  callHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    gap: 12,
+  },
+  callBackButton: {
+    width: 38,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 19,
+    backgroundColor: '#303047',
+  },
+  callVideoStage: {
+    flex: 1,
+    minHeight: 220,
+    marginHorizontal: 12,
+    borderRadius: 22,
+    overflow: 'hidden',
+    backgroundColor: '#25253C',
+    position: 'relative',
+  },
+  remoteVideo: {
+    width: '100%',
+    height: '100%',
+    minHeight: 220,
+    backgroundColor: '#25253C',
+  },
+  localVideo: {
+    position: 'absolute',
+    width: 108,
+    height: 148,
+    right: 12,
+    top: 12,
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: '#3A3A51',
+  },
+  localVideoFallback: {
+    position: 'absolute',
+    width: 108,
+    height: 60,
+    right: 12,
+    top: 12,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#3A3A51',
+  },
+  videoFallbackNotice: {
+    position: 'absolute',
+    bottom: 12,
+    left: 12,
+    right: 12,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: '#17172FDD',
+  },
+  voiceCallAvatarArea: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 250,
+  },
+  callAvatar: {
+    width: 132,
+    height: 132,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 66,
+    backgroundColor: '#34344D',
+  },
+  callStatusArea: {
+    minHeight: 66,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  callControls: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 12,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+  },
+  incomingCallActions: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 44,
+    paddingVertical: 18,
+  },
+  callControl: {
+    width: 60,
+    minHeight: 62,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    borderRadius: 22,
+    backgroundColor: '#3A3A51',
+  },
+  callControlActive: {
+    backgroundColor: '#63637B',
+  },
+  declineControl: {
+    backgroundColor: '#D92D3B',
+  },
+  acceptControl: {
+    backgroundColor: '#168653',
+  },
   chatHeader: {
-    padding: 16,
+    padding: 18,
     borderBottomWidth: 1,
     borderColor: border,
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 15,
   },
   chatInputRow: {
     flexDirection: 'row',
@@ -1229,7 +3342,7 @@ const styles = StyleSheet.create({
     borderColor: border,
   },
   chatInput: {
-    backgroundColor: light,
+    backgroundColor: '#F8FAFC',
     borderRadius: 24,
     paddingHorizontal: 18,
     paddingVertical: 12,
@@ -1253,6 +3366,23 @@ const styles = StyleSheet.create({
     marginBottom: 14,
     backgroundColor: '#fff',
   },
+  statsCard: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    backgroundColor: '#F8FAFC',
+    padding: 18,
+    borderRadius: 16,
+    marginBottom: 22,
+    borderWidth: 1,
+    borderColor: border,
+  },
+  callHistoryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderColor: '#F1F3F7',
+  },
   tabBar: {
     flexDirection: 'row',
     borderTopWidth: 1,
@@ -1264,25 +3394,6 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     gap: 4,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  modalContainer: {
-    backgroundColor: '#FFFFFF',
-    borderRadius: 20,
-    padding: 22,
-    width: '100%',
-    maxWidth: 420,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.2,
-    shadowRadius: 20,
-    elevation: 10,
   },
 });
 

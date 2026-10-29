@@ -6,22 +6,141 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
-
-import { hashPassword, verifyPassword, signJwt, requireAuth, optionalAuth } from './auth.js';
-import { COMMON_PHRASES, WORD_GAME_BANK, DAILY_CHALLENGE, evaluateGameAttempt } from './learning.js';
-import { setupSignaling } from './signaling.js';
+import mongoose from 'mongoose';
+import { User, publicUser } from './models/User.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const dbFile = path.join(root, 'data', 'store.json');
+const dbFile = process.env.BYTALK_DATA_FILE
+  ? path.resolve(process.env.BYTALK_DATA_FILE)
+  : path.join(root, 'data', 'store.json');
 fs.mkdirSync(path.dirname(dbFile), { recursive: true });
+
+// Environment configuration
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(48).toString('hex');
+if (!process.env.JWT_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error('JWT_SECRET must be configured in production.');
+}
+if (!process.env.JWT_SECRET) {
+  console.warn('JWT_SECRET is unset; sessions will be invalidated when the server restarts.');
+}
+const FIFTEEN_DAYS_SECONDS = 15 * 24 * 60 * 60; // 15 days in seconds
+const TURN_URLS = (process.env.TURN_URLS || '').split(',').map((url) => url.trim()).filter(Boolean);
+const TURN_SHARED_SECRET = process.env.TURN_SHARED_SECRET || '';
+if (TURN_URLS.length && !TURN_SHARED_SECRET) {
+  throw new Error('TURN_SHARED_SECRET is required when TURN_URLS is configured.');
+}
+
+// Optional dynamic import of jsonwebtoken and bcryptjs if installed in node_modules
+let jwtLib = null;
+const hasJwt = fs.existsSync(path.join(root, 'node_modules', 'jsonwebtoken'));
+if (hasJwt) {
+  try {
+    const mod = await import('jsonwebtoken');
+    jwtLib = mod.default || mod;
+  } catch (e) {
+    jwtLib = null;
+  }
+}
+
+let bcryptLib = null;
+const hasBcrypt = fs.existsSync(path.join(root, 'node_modules', 'bcryptjs'));
+if (hasBcrypt) {
+  try {
+    const mod = await import('bcryptjs');
+    bcryptLib = mod.default || mod;
+  } catch (e) {
+    bcryptLib = null;
+  }
+}
+
+// Password hashing and verification
+function hashPassword(password) {
+  if (bcryptLib?.hashSync) {
+    return bcryptLib.hashSync(password, 10);
+  }
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `scrypt:${salt}:${hash}`;
+}
+
+function verifyPassword(password, storedHash) {
+  if (!storedHash || typeof storedHash !== 'string') return false;
+  if (storedHash.startsWith('$2') && bcryptLib?.compareSync) {
+    return bcryptLib.compareSync(password, storedHash);
+  }
+  if (storedHash.startsWith('scrypt:')) {
+    const parts = storedHash.split(':');
+    if (parts.length !== 3) return false;
+    const [, salt, originalHash] = parts;
+    const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+    return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(originalHash, 'hex'));
+  }
+  return false;
+}
+
+// JWT Token Signing and Verification (15-day expiry)
+function signToken(payload, options = {}) {
+  const expiresInOption = options.expiresIn || '15d';
+  if (jwtLib?.sign) {
+    return jwtLib.sign(payload, JWT_SECRET, { expiresIn: expiresInOption });
+  }
+
+  // RFC 7519 compliant standard JWT implementation
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + FIFTEEN_DAYS_SECONDS;
+  const fullPayload = { ...payload, iat: now, exp };
+
+  const b64Header = Buffer.from(JSON.stringify(header)).toString('base64url');
+  const b64Payload = Buffer.from(JSON.stringify(fullPayload)).toString('base64url');
+  const data = `${b64Header}.${b64Payload}`;
+  const signature = crypto.createHmac('sha256', JWT_SECRET).update(data).digest('base64url');
+  return `${data}.${signature}`;
+}
+
+function verifyToken(token) {
+  if (!token || typeof token !== 'string') throw new Error('Token required');
+  if (jwtLib?.verify) {
+    return jwtLib.verify(token, JWT_SECRET);
+  }
+
+  const parts = token.split('.');
+  if (parts.length !== 3) throw new Error('Invalid token structure');
+  const [b64Header, b64Payload, signature] = parts;
+  const data = `${b64Header}.${b64Payload}`;
+  const expectedSig = crypto.createHmac('sha256', JWT_SECRET).update(data).digest('base64url');
+  if (signature.length !== expectedSig.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig))) {
+    throw new Error('Invalid token signature');
+  }
+
+  const payload = JSON.parse(Buffer.from(b64Payload, 'base64url').toString('utf8'));
+  const now = Math.floor(Date.now() / 1000);
+  if (payload.exp && payload.exp < now) {
+    throw new Error('Token expired');
+  }
+  return payload;
+}
+
+function sanitizeUser(user) {
+  if (!user) return null;
+  const { passwordHash, email, _id, ...safe } = user;
+  if (_id && !safe.id) safe.id = String(_id);
+  return safe;
+}
+
+function cacheUser(user) {
+  if (!user) return null;
+  const { passwordHash, ...safe } = user;
+  return { ...safe, id: String(user._id || user.id) };
+}
 
 const seed = {
   users: [
     {
       id: 'u1',
       name: 'Pavan Nerkar',
-      alias: 'PavanN',
-      email: 'pavan@bytalk.app',
+      email: 'pavan@bytalk.com',
+      passwordHash: hashPassword('password123'),
       country: 'India',
       nativeLanguage: 'Hindi',
       learningLanguage: 'English',
@@ -30,288 +149,486 @@ const seed = {
       streak: 12,
       minutes: 150,
       words: 28,
-      savedPhrases: ['phr_work_1', 'phr_int_1'],
-      blockedUsers: [],
-      referralCode: 'BYTALK-PAVAN',
-      referredCount: 3
     },
-    { id: 'u2', name: 'Yuki', alias: 'YukiTokyo', email: 'yuki@bytalk.app', country: 'Japan', nativeLanguage: 'Japanese', learningLanguage: 'English', level: 'Intermediate', online: true, minutes: 80, words: 15, streak: 5, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-YUKI', referredCount: 1 },
-    { id: 'u3', name: 'Lucas', alias: 'LucasRio', email: 'lucas@bytalk.app', country: 'Brazil', nativeLanguage: 'Portuguese', learningLanguage: 'English', level: 'Beginner', online: true, minutes: 45, words: 9, streak: 3, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-LUCAS', referredCount: 0 },
-    { id: 'u4', name: 'Minji', alias: 'MinjiSeoul', email: 'minji@bytalk.app', country: 'South Korea', nativeLanguage: 'Korean', learningLanguage: 'English', level: 'Intermediate', online: true, minutes: 110, words: 22, streak: 8, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-MINJI', referredCount: 2 },
-    { id: 'u5', name: 'Carlos', alias: 'CarlosMex', email: 'carlos@bytalk.app', country: 'Mexico', nativeLanguage: 'Spanish', learningLanguage: 'English', level: 'Intermediate', online: true, minutes: 60, words: 14, streak: 4, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-CARLOS', referredCount: 0 },
-    { id: 'u6', name: 'Aditi', alias: 'Aditi_In', email: 'aditi@bytalk.app', country: 'India', nativeLanguage: 'Hindi', learningLanguage: 'English', level: 'Beginner', online: true, minutes: 30, words: 8, streak: 2, savedPhrases: [], blockedUsers: [], referralCode: 'BYTALK-ADITI', referredCount: 0 }
+    {
+      id: 'u2',
+      name: 'Yuki',
+      email: 'yuki@bytalk.com',
+      passwordHash: hashPassword('password123'),
+      country: 'Japan',
+      nativeLanguage: 'Japanese',
+      learningLanguage: 'English',
+      level: 'Intermediate',
+      online: true,
+    },
+    {
+      id: 'u3',
+      name: 'Lucas',
+      email: 'lucas@bytalk.com',
+      passwordHash: hashPassword('password123'),
+      country: 'Brazil',
+      nativeLanguage: 'Portuguese',
+      learningLanguage: 'English',
+      level: 'Beginner',
+      online: true,
+    },
+    {
+      id: 'u4',
+      name: 'Minji',
+      email: 'minji@bytalk.com',
+      passwordHash: hashPassword('password123'),
+      country: 'South Korea',
+      nativeLanguage: 'Korean',
+      learningLanguage: 'English',
+      level: 'Intermediate',
+      online: true,
+    },
+    {
+      id: 'u5',
+      name: 'Carlos',
+      email: 'carlos@bytalk.com',
+      passwordHash: hashPassword('password123'),
+      country: 'Mexico',
+      nativeLanguage: 'Spanish',
+      learningLanguage: 'English',
+      level: 'Intermediate',
+      online: true,
+    },
+    {
+      id: 'u6',
+      name: 'Aditi',
+      email: 'aditi@bytalk.com',
+      passwordHash: hashPassword('password123'),
+      country: 'India',
+      nativeLanguage: 'Hindi',
+      learningLanguage: 'English',
+      level: 'Beginner',
+      online: true,
+    },
   ],
   rooms: [
-    { id: 'r1', name: 'Everyday English', topic: 'Daily English', level: 'Beginner - Intermediate', listeners: 24, capacity: 50, speakers: ['u1'], isLive: true, joined: 0 },
-    { id: 'r2', name: 'Job Interview Practice', topic: 'Interviews', level: 'Intermediate - Advanced', listeners: 18, capacity: 30, speakers: ['u2'], isLive: true, joined: 0 },
-    { id: 'r3', name: 'IELTS Speaking Prep', topic: 'IELTS Practice', level: 'All levels', listeners: 32, capacity: 50, speakers: ['u4'], isLive: true, joined: 0 },
-    { id: 'r4', name: 'Travel & Free Conversation', topic: 'Travel', level: 'Beginner - Intermediate', listeners: 12, capacity: 40, speakers: [], isLive: true, joined: 0 }
+    { id: 'r1', name: 'Everyday English', topic: 'English', level: 'Beginner - Intermediate', listeners: 24, joined: 0 },
+    { id: 'r2', name: 'Travel stories', topic: 'Travel', level: 'Intermediate - Advanced', listeners: 18, joined: 0 },
+    { id: 'r3', name: 'Movies & culture', topic: 'Culture', level: 'All levels', listeners: 32, joined: 0 },
+    { id: 'r4', name: 'Language exchange', topic: 'Study', level: 'Beginner - Intermediate', listeners: 12, joined: 0 },
   ],
   messages: [
     { id: 'm1', from: 'u2', to: 'u1', text: 'Hi Pavan! 👋 How is your day going?', at: new Date().toISOString() },
-    { id: 'm2', from: 'u1', to: 'u2', text: 'Hi! My day is good. I am learning English!', at: new Date().toISOString() }
+    { id: 'm2', from: 'u1', to: 'u2', text: 'Hi! My day is good. I am learning English!', at: new Date().toISOString() },
   ],
   vocabulary: [{ id: 'v1', userId: 'u1', word: 'conversation', category: 'Conversation' }],
   reports: [],
-  blocks: [],
-  auditLogs: []
 };
 
 let store;
 try {
   store = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
+  if (!Array.isArray(store.users)) {
+    store.users = seed.users;
+  }
+  // Ensure existing stored users have email and secure password hashes
+  let updated = false;
+  for (const u of store.users) {
+    if (!u.email) {
+      u.email = `${u.name.toLowerCase().replace(/[^a-z0-9]/g, '')}@bytalk.com`;
+      updated = true;
+    }
+    if (!u.passwordHash) {
+      u.passwordHash = hashPassword('password123');
+      updated = true;
+    }
+  }
+  if (updated) {
+    fs.writeFileSync(dbFile, JSON.stringify(store, null, 2));
+  }
 } catch {
   store = seed;
   fs.writeFileSync(dbFile, JSON.stringify(store, null, 2));
 }
 
-// Data normalization to ensure all fields from Section 19 exist
-if (!store.blocks) store.blocks = [];
-if (!store.auditLogs) store.auditLogs = [];
-if (!store.callFeedback) store.callFeedback = [];
-if (!store.notes) store.notes = [];
-if (!store.notificationPreferences) store.notificationPreferences = {};
-if (!store.passwordResetTokens) store.passwordResetTokens = [];
-store.users.forEach((u) => {
-  if (!u.savedPhrases) u.savedPhrases = [];
-  if (!u.blockedUsers) u.blockedUsers = [];
-  if (!u.alias) u.alias = u.name ? u.name.split(' ')[0] : 'Learner';
-  if (!u.referralCode) u.referralCode = `BYTALK-${(u.name || 'USER').toUpperCase().slice(0, 5)}-${Math.floor(100 + Math.random() * 900)}`;
-  if (u.referredCount === undefined) u.referredCount = 0;
-});
+if (!Array.isArray(store.messages)) store.messages = [];
+if (!Array.isArray(store.calls)) store.calls = [];
 
 const save = () => fs.writeFileSync(dbFile, JSON.stringify(store, null, 2));
 
-const logAuditEvent = (actor, eventType, target) => {
-  store.auditLogs.push({
-    id: crypto.randomUUID(),
-    actor: actor || 'system',
-    eventType,
-    target: target || null,
-    timestamp: new Date().toISOString()
-  });
-  save();
-};
+const mongoUri = process.env.MONGODB_URI;
+if (!mongoUri) {
+  throw new Error('MONGODB_URI must be configured in backend/.env.');
+}
+
+try {
+  await mongoose.connect(mongoUri);
+  console.log('MongoDB Atlas connected successfully.');
+
+  const existingUsers = await User.countDocuments();
+  if (existingUsers === 0 && Array.isArray(store.users)) {
+    const legacyUsers = store.users
+      .filter((user) => user.passwordHash?.startsWith('$2'))
+      .map((user) => ({
+        name: user.name,
+        email: user.email,
+        passwordHash: user.passwordHash,
+        country: user.country,
+        nativeLanguage: user.nativeLanguage,
+        learningLanguage: user.learningLanguage,
+        level: user.level,
+        streak: user.streak,
+        minutes: user.minutes,
+        words: user.words,
+      }));
+    if (legacyUsers.length) {
+      await User.insertMany(legacyUsers, { ordered: false });
+      console.log(`Migrated ${legacyUsers.length} bcrypt user(s) from the local store.`);
+    }
+  }
+  store.users = (await User.find().lean()).map(cacheUser);
+} catch (error) {
+  console.error(`MongoDB connection failed: ${error.message}`);
+  process.exitCode = 1;
+  throw error;
+}
 
 const app = express();
-const corsOrigin = process.env.CORS_ORIGIN || '*';
-app.use(cors({ origin: corsOrigin, credentials: true }));
+app.use(
+  cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
 app.use(express.json({ limit: '128kb' }));
 
-// Request logging middleware for visual confirmation of client connections
+// Auth Token Middleware
 app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`[HTTP] ${req.method} ${req.originalUrl} - ${res.statusCode} (${duration}ms)`);
-  });
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7).trim();
+    try {
+      const decoded = verifyToken(token);
+      req.user = decoded;
+    } catch (err) {
+      // Invalid or expired token
+    }
+  }
   next();
 });
 
 const httpServer = createServer(app);
-const io = new Server(httpServer, {
-  cors: {
-    origin: corsOrigin,
-    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-    credentials: true
+const io = new Server(httpServer, { cors: { origin: '*' } });
+const userSockets = new Map();
+const activeCalls = new Map();
+const userCalls = new Map();
+const callTimers = new Map();
+
+function emitToUser(userId, event, payload) {
+  io.to(`user:${userId}`).emit(event, payload);
+}
+
+function requireAuth(req, res, next) {
+  const user = store.users.find((item) => item.id === req.user?.userId);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  req.authenticatedUser = user;
+  next();
+}
+
+function participantForCall(call, userId) {
+  if (call.callerId === userId) return call.calleeId;
+  if (call.calleeId === userId) return call.callerId;
+  return null;
+}
+
+function saveCall(call) {
+  const record = store.calls.find((item) => item.id === call.id);
+  if (record) Object.assign(record, call);
+  else store.calls.push(call);
+  save();
+}
+
+function finishCall(call, status, endedBy) {
+  const timer = callTimers.get(call.id);
+  if (timer) clearTimeout(timer);
+  callTimers.delete(call.id);
+  const disconnectTimer = callTimers.get(`disconnect:${call.id}`);
+  if (disconnectTimer) clearTimeout(disconnectTimer);
+  callTimers.delete(`disconnect:${call.id}`);
+  call.status = status;
+  call.endedAt = new Date().toISOString();
+  call.endedBy = endedBy || null;
+  if (call.connectedAt) {
+    call.durationSeconds = Math.max(0, Math.floor((Date.parse(call.endedAt) - Date.parse(call.connectedAt)) / 1000));
+  } else {
+    call.durationSeconds = 0;
+  }
+  saveCall(call);
+  activeCalls.delete(call.id);
+  userCalls.delete(call.callerId);
+  userCalls.delete(call.calleeId);
+}
+
+function armCallTimeout(call, status, durationMs, onTimeout) {
+  const existing = callTimers.get(call.id);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    if (activeCalls.get(call.id) !== call || call.status !== status) return;
+    onTimeout();
+  }, durationMs);
+  timer.unref?.();
+  callTimers.set(call.id, timer);
+}
+
+// Health check endpoints
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'BYTALK API', time: new Date().toISOString() }));
+app.get('/health', (req, res) => res.json({ ok: true, service: 'BYTALK API', time: new Date().toISOString() }));
+
+// AUTHENTICATION: REGISTER
+app.post('/api/register', async (req, res) => {
+  const { name, email, password } = req.body;
+  if (!name || typeof name !== 'string' || !name.trim()) {
+    return res.status(400).json({ error: 'Full name is required' });
+  }
+  if (!email || typeof email !== 'string' || !email.trim()) {
+    return res.status(400).json({ error: 'Email address is required' });
+  }
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const cleanEmail = email.trim().toLowerCase();
+  if (!emailRegex.test(cleanEmail)) {
+    return res.status(400).json({ error: 'Valid email address is required' });
+  }
+  if (!password || typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+  }
+
+  try {
+    // Check if email already registered
+    const existing = await User.exists({ email: cleanEmail });
+    if (existing) {
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
+
+    const newUser = await User.create({
+      name: name.trim().slice(0, 80),
+      email: cleanEmail,
+      passwordHash: hashPassword(password),
+      country: '',
+      nativeLanguage: '',
+      learningLanguage: 'English',
+      level: 'Beginner',
+      online: true,
+      streak: 1,
+      minutes: 0,
+      words: 0,
+      createdAt: new Date().toISOString(),
+    });
+    const cachedUser = cacheUser(newUser.toObject());
+    store.users.push(cachedUser);
+
+    // Issue 15-day JWT token
+    const token = signToken({ userId: cachedUser.id, email: newUser.email }, { expiresIn: '15d' });
+    return res.status(201).json({ ok: true, user: { ...publicUser(newUser), email: newUser.email }, token });
+  } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({ error: 'An account with this email already exists' });
+    }
+    console.error(`Registration database error: ${error.message}`);
+    return res.status(503).json({ error: 'Registration service is temporarily unavailable.' });
   }
 });
 
-// Root welcome route for quick health inspection
-app.get('/', (req, res) => {
-  res.json({
-    service: 'BYTALK Backend API',
-    status: 'online',
-    version: '1.0.0',
-    documentation: 'Aparaitech Software BYTALK Specification',
-    endpoints: {
-      health: '/api/health',
-      stats: '/api/stats',
-      users: '/api/users',
-      dashboard: '/api/dashboard/u1',
-      rooms: '/rooms',
-      phrases: '/phrases',
-      games: '/games/questions',
-      dailyQuiz: '/api/quiz/daily'
+// AUTHENTICATION: LOGIN
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || typeof email !== 'string' || !email.trim()) {
+    return res.status(400).json({ error: 'Email address is required' });
+  }
+  if (!password || typeof password !== 'string') {
+    return res.status(400).json({ error: 'Password is required' });
+  }
+
+  try {
+    const cleanEmail = email.trim().toLowerCase();
+    const userDocument = await User.findOne({ email: cleanEmail }).select('+passwordHash');
+    if (!userDocument || !verifyPassword(password, userDocument.passwordHash)) {
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
-  });
+
+    const user = cacheUser(userDocument.toObject());
+    user.online = true;
+    store.users = store.users.map((item) => item.id === user.id ? user : item);
+
+    // Issue 15-day JWT token
+    const token = signToken({ userId: user.id, email: user.email }, { expiresIn: '15d' });
+    return res.json({ ok: true, user: { ...publicUser(userDocument), email: user.email }, token });
+  } catch (error) {
+    console.error(`Login database error: ${error.message}`);
+    return res.status(503).json({ error: 'Authentication service is temporarily unavailable.' });
+  }
 });
 
-// ==========================================
-// 1. ORIGINAL CORE API ENDPOINTS (PRESERVED)
-// ==========================================
-
-app.get('/api/health', (req, res) => res.json({ ok: true, service: 'BYTALK API' }));
-
-app.get('/api/users', (req, res) => {
-  const safeUsers = store.users.map((u) => {
-    const { passwordHash, ...safe } = u;
-    return safe;
-  });
-  res.json(safeUsers);
+// AUTHENTICATION: VALIDATE SESSION / GET CURRENT USER
+app.get('/api/auth/me', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authorization token required' });
+  }
+  const token = authHeader.slice(7).trim();
+  try {
+    const decoded = verifyToken(token);
+    const user = await User.findById(decoded.userId);
+    if (!user) {
+      return res.status(401).json({ error: 'User session not found or account removed' });
+    }
+    return res.json({ ok: true, user: { ...publicUser(user), email: user.email } });
+  } catch (err) {
+    return res.status(401).json({ error: err.message || 'Invalid or expired session token' });
+  }
 });
 
-app.get('/api/partners', (req, res) => {
+// USERS & PARTNERS
+app.get('/api/users', requireAuth, async (req, res) => {
+  const users = await User.find({ _id: { $ne: req.authenticatedUser._id } }).lean();
+  store.users = (await User.find().lean()).map(cacheUser);
+  res.json(users.map(publicUser));
+});
+
+async function listDiscoverUsers(req, res) {
+  const currentUserId = req.authenticatedUser.id;
   const q = String(req.query.q || '').toLowerCase();
-  res.json(
-    store.users.filter(
-      (u) =>
-        u.id !== 'u1' &&
-        [u.name, u.alias, u.country, u.nativeLanguage, u.level].some((x) =>
-          String(x || '').toLowerCase().includes(q)
-        )
-    )
-  );
-});
+  const mongoUsers = await User.find({ _id: { $ne: currentUserId } }).lean();
+  store.users = (await User.find().lean()).map(cacheUser);
+  const users = mongoUsers
+    .map((user) => {
+      const avatarUrl = user.profilePhotoUrl || null;
+      return {
+        id: String(user._id),
+        name: user.name,
+        displayName: user.displayName || user.name,
+        avatarUrl: typeof avatarUrl === 'string' ? avatarUrl : null,
+        country: user.country || '',
+        nativeLanguage: user.nativeLanguage || '',
+        learningLanguage: user.learningLanguage || '',
+        languages: [user.nativeLanguage, user.learningLanguage].filter(Boolean),
+        level: user.level || '',
+        online: (userSockets.get(user.id)?.size || 0) > 0,
+      };
+    })
+    .filter((user) =>
+      [user.displayName, user.country, ...user.languages, user.level]
+        .some((value) => String(value || '').toLowerCase().includes(q))
+    );
+  res.json(users);
+}
 
-app.post('/api/onboard', (req, res) => {
+app.get('/api/users/discover', requireAuth, listDiscoverUsers);
+app.get('/api/partners', requireAuth, listDiscoverUsers);
+
+app.post('/api/onboard', requireAuth, async (req, res) => {
   const { name, country, nativeLanguage, learningLanguage, level } = req.body;
-  const me = store.users.find((u) => u.id === 'u1');
+  const me = req.authenticatedUser;
   for (const [k, v] of Object.entries({ name, country, nativeLanguage, learningLanguage, level })) {
     if (typeof v === 'string' && v.trim()) me[k] = v.trim().slice(0, 80);
   }
-  save();
-  res.json(me);
+  const updated = await User.findByIdAndUpdate(me.id, {
+    name: me.name,
+    country: me.country,
+    nativeLanguage: me.nativeLanguage,
+    learningLanguage: me.learningLanguage,
+    level: me.level,
+  }, { new: true });
+  store.users = store.users.map((user) => user.id === me.id ? cacheUser({ ...updated.toObject(), passwordHash: me.passwordHash }) : user);
+  res.json({ ...publicUser(updated), email: updated.email });
 });
 
-app.get(['/api/rooms', '/rooms'], (req, res) => res.json(store.rooms));
+app.get('/api/rooms', (req, res) => res.json(store.rooms));
 
-// Fetch specific room details (Section 20: GET /rooms; GET /rooms/:id)
-app.get(['/api/rooms/:id', '/rooms/:id'], (req, res) => {
+app.post('/api/rooms/:id/join', (req, res) => {
   const room = store.rooms.find((r) => r.id === req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found' });
-  const speakerDetails = store.users
-    .filter((u) => (room.speakers || []).includes(u.id))
-    .map(({ passwordHash, ...safe }) => safe);
-  res.json({ ...room, speakerDetails });
-});
-
-app.post(['/api/rooms/:id/join', '/rooms/:id/join'], (req, res) => {
-  const room = store.rooms.find((r) => r.id === req.params.id);
-  if (!room) return res.status(404).json({ error: 'Room not found' });
-  room.joined = (room.joined || 0) + 1;
-  room.listeners = (room.listeners || 0) + 1;
+  room.joined++;
   save();
   io.emit('rooms:changed', store.rooms);
   res.json(room);
 });
 
-app.post(['/api/rooms/:id/leave', '/rooms/:id/leave'], (req, res) => {
-  const room = store.rooms.find((r) => r.id === req.params.id);
-  if (!room) return res.status(404).json({ error: 'Room not found' });
-  if (room.listeners > 0) room.listeners -= 1;
-  save();
-  io.emit('rooms:changed', store.rooms);
-  res.json({ message: 'Left room successfully.', room });
-});
-
-// Create new audio room (Section 8: Host can create/open/close room)
-app.post(['/api/rooms', '/rooms'], optionalAuth(store), (req, res) => {
-  const { name, topic, level, capacity } = req.body;
-  const hostId = req.user?.id || req.body.hostId || 'u1';
-  if (!name || typeof name !== 'string' || !name.trim()) {
-    return res.status(400).json({ error: 'Room name is required' });
+app.get('/api/messages/:a/:b', requireAuth, (req, res) => {
+  const { a, b } = req.params;
+  const currentUserId = req.authenticatedUser.id;
+  if (![a, b].includes(currentUserId) || a === b || !store.users.some((user) => user.id === (a === currentUserId ? b : a))) {
+    return res.status(403).json({ error: 'You are not a participant in this conversation' });
   }
-  const newRoom = {
-    id: `r_${crypto.randomBytes(4).toString('hex')}`,
-    name: name.trim().slice(0, 60),
-    topic: topic || 'Daily English',
-    level: level || 'All levels',
-    capacity: Number(capacity) || 50,
-    listeners: 1,
-    joined: 1,
-    speakers: [hostId],
-    hostId,
-    speakerRequests: [],
-    isLive: true,
-    createdAt: new Date().toISOString()
-  };
-  store.rooms.push(newRoom);
-  logAuditEvent(hostId, 'ROOM_CREATED', newRoom.id);
-  save();
-  io.emit('rooms:changed', store.rooms);
-  res.status(201).json(newRoom);
-});
-
-// Raise Hand / Request Speaker status (Section 8 & 9)
-app.post(['/api/rooms/:id/raise-hand', '/rooms/:id/raise-hand'], optionalAuth(store), (req, res) => {
-  const room = store.rooms.find((r) => r.id === req.params.id);
-  if (!room) return res.status(404).json({ error: 'Room not found' });
-  const userId = req.user?.id || req.body.userId || 'u1';
-  if (!room.speakerRequests) room.speakerRequests = [];
-  if (!room.speakers) room.speakers = [];
-  if (room.speakers.includes(userId)) {
-    return res.json({ message: 'User is already a speaker in this room', room });
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 100));
+  const before = req.query.before ? Date.parse(String(req.query.before)) : Infinity;
+  if (!Number.isFinite(before) && before !== Infinity) {
+    return res.status(400).json({ error: 'Invalid message cursor' });
   }
-  if (!room.speakerRequests.includes(userId)) {
-    room.speakerRequests.push(userId);
-  }
-  save();
-  io.emit('rooms:changed', store.rooms);
-  io.emit(`room:${room.id}:event`, { type: 'raise_hand', userId });
-  res.json({ message: 'Speaker request submitted to room host.', room });
-});
-
-// Host approves speaker request (Section 8)
-app.post(['/api/rooms/:id/approve-speaker', '/rooms/:id/approve-speaker'], (req, res) => {
-  const room = store.rooms.find((r) => r.id === req.params.id);
-  if (!room) return res.status(404).json({ error: 'Room not found' });
-  const { userId } = req.body;
-  if (!userId) return res.status(400).json({ error: 'userId is required' });
-  if (!room.speakers) room.speakers = [];
-  if (!room.speakers.includes(userId)) {
-    room.speakers.push(userId);
-  }
-  room.speakerRequests = (room.speakerRequests || []).filter((id) => id !== userId);
-  save();
-  io.emit('rooms:changed', store.rooms);
-  io.emit(`room:${room.id}:event`, { type: 'speaker_approved', userId });
-  res.json({ message: 'User promoted to speaker.', room });
-});
-
-app.get('/api/messages/:a/:b', (req, res) =>
-  res.json(
-    store.messages.filter(
-      (m) =>
-        (m.from === req.params.a && m.to === req.params.b) ||
-        (m.from === req.params.b && m.to === req.params.a)
+  const conversation = store.messages
+    .filter((message) =>
+      ((message.from === a && message.to === b) || (message.from === b && message.to === a))
+      && Date.parse(message.at) < before
     )
-  )
-);
+    .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+  const messages = conversation.slice(-limit);
+  let changed = false;
+  for (const message of messages) {
+    if (message.to === currentUserId && !message.readAt) {
+      message.readAt = new Date().toISOString();
+      emitToUser(message.from, 'message:status', { id: message.id, deliveredAt: message.deliveredAt, readAt: message.readAt });
+      changed = true;
+    }
+  }
+  if (changed) save();
+  res.json(messages);
+});
 
-app.post('/api/messages', (req, res) => {
-  const { from, to, text } = req.body;
-  if (
-    !store.users.some((u) => u.id === from) ||
-    !store.users.some((u) => u.id === to) ||
-    typeof text !== 'string' ||
-    !text.trim() ||
-    text.length > 1500
-  )
+app.post('/api/messages', requireAuth, (req, res) => {
+  const { to, text } = req.body;
+  const senderId = req.authenticatedUser.id;
+  if (typeof to !== 'string' || to === senderId || !store.users.some((user) => user.id === to) || typeof text !== 'string' || !text.trim() || text.length > 1500) {
     return res.status(400).json({ error: 'Invalid message' });
-
-  const msg = { id: crypto.randomUUID(), from, to, text: text.trim(), at: new Date().toISOString() };
+  }
+  const deliveredAt = (userSockets.get(to)?.size || 0) > 0 ? new Date().toISOString() : null;
+  const msg = { id: crypto.randomUUID(), from: senderId, to, text: text.trim(), at: new Date().toISOString(), deliveredAt, readAt: null };
   store.messages.push(msg);
   save();
-  io.emit('message:new', msg);
+  emitToUser(senderId, 'message:new', msg);
+  emitToUser(to, 'message:new', msg);
   res.status(201).json(msg);
 });
 
-app.get('/api/vocabulary/:userId', (req, res) =>
-  res.json(store.vocabulary.filter((v) => v.userId === req.params.userId))
-);
+app.get('/api/calls', requireAuth, (req, res) => {
+  const currentUserId = req.authenticatedUser.id;
+  res.json(
+    store.calls
+      .filter((call) => call.callerId === currentUserId || call.calleeId === currentUserId)
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
+      .slice(0, 100)
+  );
+});
+
+app.get('/api/rtc-config', requireAuth, (req, res) => {
+  const iceServers = (process.env.RTC_STUN_URLS || 'stun:stun.l.google.com:19302')
+    .split(',')
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .map((urls) => ({ urls }));
+  if (TURN_URLS.length) {
+    const expiresAt = Math.floor(Date.now() / 1000) + 15 * 60;
+    const username = `${expiresAt}:${req.authenticatedUser.id}`;
+    const credential = crypto.createHmac('sha1', TURN_SHARED_SECRET).update(username).digest('base64');
+    iceServers.push({ urls: TURN_URLS, username, credential });
+  }
+  res.set('Cache-Control', 'no-store');
+  res.json({ iceServers });
+});
+app.get('/api/vocabulary/:userId', (req, res) => {
+  const currentUserId = req.user?.userId || req.params.userId;
+  res.json(store.vocabulary.filter((v) => v.userId === currentUserId || v.userId === req.params.userId));
+});
 
 app.post('/api/vocabulary', (req, res) => {
-  const { userId, word, category } = req.body;
-  if (typeof word !== 'string' || !word.trim() || word.length > 100)
-    return res.status(400).json({ error: 'Invalid word' });
-
-  const item = {
-    id: crypto.randomUUID(),
-    userId: userId || 'u1',
-    word: word.trim(),
-    category: category || 'Conversation'
-  };
+  const { word, category } = req.body;
+  const currentUserId = req.user?.userId || req.body.userId || 'u1';
+  if (typeof word !== 'string' || !word.trim() || word.length > 100) return res.status(400).json({ error: 'Invalid word' });
+  const item = { id: crypto.randomUUID(), userId: currentUserId, word: word.trim(), category: category || 'Conversation' };
   store.vocabulary.push(item);
   const u = store.users.find((x) => x.id === item.userId);
   if (u) u.words = (u.words || 0) + 1;
@@ -326,853 +643,243 @@ app.get('/api/stats', (req, res) =>
     messages: store.messages.length,
     reports: store.reports.filter((r) => r.status === 'open').length,
     activeUsers: store.users.filter((x) => x.online).length,
-    totalBlocks: store.blocks.length
   })
 );
 
-// In-memory rate limiting tracker for report submissions (Spam & Abuse Prevention)
-const recentReportsTracker = new Map(); // reporterId -> [timestamp1, timestamp2, ...]
-
 app.get('/api/reports', (req, res) => res.json(store.reports));
 
-app.post(['/api/reports', '/reports'], optionalAuth(store), (req, res) => {
-  const reporterId = req.user?.id || req.body.reporterId || 'anonymous_user';
-  const { reason, reportedUserId, sessionId } = req.body;
-
-  if (typeof reason !== 'string' || !reason.trim() || reason.trim().length < 5) {
-    return res.status(400).json({ error: 'A specific, descriptive reason (minimum 5 characters) is required for safety reports.' });
-  }
-
-  // 1. Prevent Self-Reporting
-  if (reportedUserId && reportedUserId === reporterId) {
-    return res.status(400).json({ error: 'You cannot submit a safety report against your own account.' });
-  }
-
-  // 2. Anti-Spam Throttling & Rate Limiting (Section 12: "Apply spam prevention, request throttling")
-  const now = Date.now();
-  const windowMs = 10 * 60 * 1000; // 10-minute sliding window
-  const maxReportsPerWindow = 3;
-
-  const userReportTimestamps = (recentReportsTracker.get(reporterId) || []).filter(
-    (t) => now - t < windowMs
-  );
-
-  if (userReportTimestamps.length >= maxReportsPerWindow) {
-    return res.status(429).json({
-      error: 'Abuse protection: You have exceeded the maximum report submissions allowed in a 10-minute window. Please wait before submitting more reports.'
-    });
-  }
-
-  userReportTimestamps.push(now);
-  recentReportsTracker.set(reporterId, userReportTimestamps);
-
-  // 3. Prevent Duplicate Harassment Reports against the same user
-  const duplicateOpenReport = store.reports.find(
-    (r) => r.reporterId === reporterId && r.reportedUserId === reportedUserId && r.status === 'open'
-  );
-  if (duplicateOpenReport) {
-    return res.status(409).json({
-      error: 'A report against this user is already open and currently under moderation review.'
-    });
-  }
-
-  // 4. Interaction Verification (Context Check)
-  // Check if reporter and reported user actually had shared interactions (messages or sessions)
-  const hasSharedMessages = reportedUserId
-    ? store.messages.some(
-        (m) =>
-          (m.from === reporterId && m.to === reportedUserId) ||
-          (m.from === reportedUserId && m.to === reporterId)
-      )
-    : false;
-
-  const verificationStatus = (sessionId || hasSharedMessages) ? 'context_verified' : 'unverified_interaction';
-
-  // 5. Check Reporter Reputation (Section 12: "Limits on abusive behavior")
-  const reporter = store.users.find((u) => u.id === reporterId);
-  const falseReportCount = reporter?.falseReportCount || 0;
-  const isHighRiskReporter = falseReportCount >= 3;
-
+app.post('/api/reports', (req, res) => {
+  const { reason, reportedUserId } = req.body;
+  if (typeof reason !== 'string' || !reason.trim()) return res.status(400).json({ error: 'Reason required' });
   const report = {
     id: crypto.randomUUID(),
-    reporterId,
+    reason: reason.slice(0, 500),
     reportedUserId: reportedUserId || null,
-    sessionId: sessionId || null,
-    reason: reason.trim().slice(0, 500),
-    verificationStatus, // Flag whether direct interaction evidence exists
-    reporterCredibility: isHighRiskReporter ? 'flagged_for_false_reports' : 'standard',
     status: 'open',
-    at: new Date().toISOString()
+    at: new Date().toISOString(),
   };
-
   store.reports.push(report);
-  logAuditEvent(reporterId, 'REPORT_FILED', reportedUserId);
   save();
-
-  res.status(201).json({
-    message: 'Report received and queued for moderator review. Innocent users are never penalized without human verification.',
-    report
-  });
+  res.status(201).json(report);
 });
 
 app.patch('/api/reports/:id', (req, res) => {
   const report = store.reports.find((r) => r.id === req.params.id);
-  if (!report) return res.status(404).json({ error: 'Report not found' });
-
-  const validStatuses = ['open', 'resolved', 'dismissed_as_false'];
-  if (!validStatuses.includes(req.body.status)) {
-    return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
-  }
-
+  if (!report) return res.status(404).json({ error: 'Not found' });
+  if (!['open', 'resolved'].includes(req.body.status)) return res.status(400).json({ error: 'Invalid status' });
   report.status = req.body.status;
-  report.reviewedAt = new Date().toISOString();
-  report.moderatorNotes = req.body.moderatorNotes || null;
-
-  // If dismissed as false / malicious report, penalize the malicious reporter
-  if (req.body.status === 'dismissed_as_false' && report.reporterId) {
-    const maliciousReporter = store.users.find((u) => u.id === report.reporterId);
-    if (maliciousReporter) {
-      maliciousReporter.falseReportCount = (maliciousReporter.falseReportCount || 0) + 1;
-      logAuditEvent('moderator', 'REPORTER_PENALIZED_FOR_FALSE_REPORT', report.reporterId);
-    }
-  }
-
-  logAuditEvent('moderator', 'REPORT_STATUS_UPDATED', report.id);
   save();
-  res.json({ message: 'Report updated successfully.', report });
+  res.json(report);
 });
 
-// ===============================================================
-// 2. USER AUTHENTICATION & SESSIONS (Section 5, 19, 20)
-// ===============================================================
-
-// Create user session / Register (POST /auth/register and POST /api/auth/register)
-app.post(['/auth/register', '/api/auth/register'], (req, res) => {
-  const { name, alias, email, password, country, nativeLanguage, learningLanguage, level } = req.body;
-
-  if (!name || typeof name !== 'string' || name.trim().length < 2) {
-    return res.status(400).json({ error: 'Display name is required (min 2 chars).' });
-  }
-
-  if (!password || typeof password !== 'string' || password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
-  }
-
-  const normalizedEmail = (email || `${name.toLowerCase().replace(/\s+/g, '')}@bytalk.app`).toLowerCase().trim();
-
-  if (store.users.some((u) => u.email && u.email.toLowerCase() === normalizedEmail)) {
-    return res.status(409).json({ error: 'An account with this email address already exists.' });
-  }
-
-  const userId = `u_${crypto.randomBytes(6).toString('hex')}`;
-  const newUser = {
-    id: userId,
-    name: name.trim().slice(0, 80),
-    alias: alias ? alias.trim().slice(0, 40) : name.trim().split(' ')[0],
-    email: normalizedEmail,
-    passwordHash: hashPassword(password),
-    country: country?.trim() || 'Global',
-    nativeLanguage: nativeLanguage?.trim() || 'English',
-    learningLanguage: learningLanguage?.trim() || 'English',
-    level: level?.trim() || 'Intermediate',
-    online: true,
-    streak: 1,
-    minutes: 0,
-    words: 0,
-    quizzesCompleted: 0,
-    savedPhrases: [],
-    blockedUsers: [],
-    referralCode: `BYTALK-${name.trim().toUpperCase().slice(0, 5)}-${Math.floor(100 + Math.random() * 900)}`,
-    referredCount: 0,
-    createdAt: new Date().toISOString()
-  };
-
-  store.users.push(newUser);
-  logAuditEvent(newUser.id, 'USER_REGISTERED', newUser.id);
-  save();
-
-  const token = signJwt({ userId: newUser.id, name: newUser.name, email: newUser.email });
-  const { passwordHash, ...safeUser } = newUser;
-
-  res.status(201).json({
-    message: 'User registered successfully.',
-    token,
-    user: safeUser
-  });
-});
-
-// Create user session / Login (POST /auth/login and POST /api/auth/login)
-app.post(['/auth/login', '/api/auth/login'], (req, res) => {
-  const { identifier, email, password } = req.body;
-  const loginKey = String(identifier || email || '').toLowerCase().trim();
-
-  if (!loginKey) {
-    return res.status(400).json({ error: 'Email, username, or ID is required to login.' });
-  }
-
-  const user = store.users.find(
-    (u) =>
-      u.id === loginKey ||
-      (u.email && u.email.toLowerCase() === loginKey) ||
-      (u.name && u.name.toLowerCase() === loginKey) ||
-      (u.alias && u.alias.toLowerCase() === loginKey)
-  );
-
-  if (!user) {
-    return res.status(401).json({ error: 'No user account found matching those credentials.' });
-  }
-
-  if (user.passwordHash) {
-    if (!password || !verifyPassword(password, user.passwordHash)) {
-      return res.status(401).json({ error: 'Invalid password.' });
-    }
-  } else if (password && typeof password === 'string' && password.length >= 4) {
-    user.passwordHash = hashPassword(password);
-    save();
-  }
-
-  user.online = true;
-  save();
-
-  const token = signJwt({ userId: user.id, name: user.name, email: user.email || '' });
-  const { passwordHash, ...safeUser } = user;
-
-  res.json({
-    message: 'Login successful.',
-    token,
-    user: safeUser
-  });
-});
-
-// Password Reset Request (Section 5.1: "password reset and verification")
-app.post(['/auth/forgot-password', '/api/auth/forgot-password'], (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: 'Email address is required.' });
-  const user = store.users.find((u) => (u.email || '').toLowerCase() === email.toLowerCase().trim());
-  if (!user) {
-    return res.json({ message: 'If that email is registered, a password reset token has been generated.' });
-  }
-  const resetToken = crypto.randomBytes(24).toString('hex');
-  if (!store.passwordResetTokens) store.passwordResetTokens = [];
-  store.passwordResetTokens.push({
-    userId: user.id,
-    token: resetToken,
-    expiresAt: Date.now() + 3600 * 1000 // 1 hour validity
-  });
-  logAuditEvent(user.id, 'PASSWORD_RESET_REQUESTED', user.id);
-  save();
-  res.json({
-    message: 'Password reset token generated.',
-    resetToken
-  });
-});
-
-// Password Reset Completion (Section 5.1)
-app.post(['/auth/reset-password', '/api/auth/reset-password'], (req, res) => {
-  const { resetToken, newPassword } = req.body;
-  if (!resetToken || !newPassword || newPassword.length < 6) {
-    return res.status(400).json({ error: 'Valid reset token and new password (min 6 chars) are required.' });
-  }
-  if (!store.passwordResetTokens) store.passwordResetTokens = [];
-  const tokenEntry = store.passwordResetTokens.find(
-    (t) => t.token === resetToken && t.expiresAt > Date.now()
-  );
-  if (!tokenEntry) {
-    return res.status(400).json({ error: 'Invalid or expired password reset token.' });
-  }
-  const user = store.users.find((u) => u.id === tokenEntry.userId);
-  if (!user) return res.status(404).json({ error: 'User not found.' });
-
-  user.passwordHash = hashPassword(newPassword);
-  store.passwordResetTokens = store.passwordResetTokens.filter((t) => t.token !== resetToken);
-  logAuditEvent(user.id, 'PASSWORD_RESET_COMPLETED', user.id);
-  save();
-  res.json({ message: 'Password reset successful. You can now login with your new password.' });
-});
-
-// User Profile (GET /me, PATCH /me, DELETE /me per Section 16 & 20)
-app.get(['/me', '/api/me'], optionalAuth(store), (req, res) => {
-  const user = req.user || store.users[0];
-  const { passwordHash, ...safeUser } = user;
-  res.json({ user: safeUser });
-});
-
-app.patch(['/me', '/api/me'], optionalAuth(store), (req, res) => {
-  const user = req.user || store.users[0];
-  const allowed = ['alias', 'name', 'country', 'level', 'nativeLanguage', 'learningLanguage', 'goals', 'interests', 'avatar'];
-
-  allowed.forEach((field) => {
-    if (req.body[field] !== undefined) {
-      user[field] = req.body[field];
-    }
-  });
-
-  save();
-  const { passwordHash, ...safeUser } = user;
-  res.json({ message: 'Profile updated successfully.', user: safeUser });
-});
-
-// Privacy Account Deletion (Section 16: "Expose account deletion, data export/request")
-app.delete(['/me', '/api/me'], optionalAuth(store), (req, res) => {
-  const user = req.user || store.users.find((u) => u.id === req.body.userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-
-  store.users = store.users.filter((u) => u.id !== user.id);
-  store.messages = store.messages.filter((m) => m.from !== user.id && m.to !== user.id);
-  store.vocabulary = store.vocabulary.filter((v) => v.userId !== user.id);
-  logAuditEvent(user.id, 'ACCOUNT_DELETED', user.id);
-  save();
-
-  res.json({ message: 'Account and associated personal data deleted cleanly.' });
-});
-
-// Privacy Data Export / Takeout (Section 16: "data export/request consistent with applicable laws")
-app.get(['/me/export', '/api/me/export'], optionalAuth(store), (req, res) => {
-  const user = req.user || store.users[0];
-  const { passwordHash, ...safeUser } = user;
-  const userNotes = (store.notes || []).filter((n) => n.userId === user.id);
-  const userVocab = (store.vocabulary || []).filter((v) => v.userId === user.id);
-  const userSavedPhrases = COMMON_PHRASES.filter((p) => (user.savedPhrases || []).includes(p.id));
-  const userFeedback = (store.callFeedback || []).filter((f) => f.userId === user.id);
-
-  logAuditEvent(user.id, 'DATA_EXPORT_REQUESTED', user.id);
-
-  res.setHeader('Content-Disposition', `attachment; filename="bytalk-export-${user.id}.json"`);
-  res.json({
-    exportVersion: '1.0',
-    exportedAt: new Date().toISOString(),
-    user: safeUser,
-    learningHistory: {
-      streak: user.streak || 0,
-      practiceMinutes: user.minutes || 0,
-      wordsCount: user.words || 0,
-      quizzesCompleted: user.quizzesCompleted || 0
-    },
-    vocabulary: userVocab,
-    savedPhrases: userSavedPhrases,
-    notes: userNotes,
-    callFeedback: userFeedback
-  });
-});
-
-// ===============================================================
-// 3. RANDOM MATCHMAKING & SESSION APIS (Section 7, 20)
-// ===============================================================
-
-// REST Match Request (POST /matches, DELETE /matches/:id)
-const pendingMatchRequests = new Map();
-
-app.post(['/matches', '/api/matches'], optionalAuth(store), (req, res) => {
-  const user = req.user || store.users.find((u) => u.id === req.body.userId) || store.users[0];
-  const requestId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-
-  // Find another pending match request not blocked
-  let matchedEntry = null;
-  for (const [otherReqId, entry] of pendingMatchRequests.entries()) {
-    if (entry.userId !== user.id && !(user.blockedUsers || []).includes(entry.userId)) {
-      matchedEntry = { otherReqId, ...entry };
-      break;
-    }
-  }
-
-  if (matchedEntry) {
-    pendingMatchRequests.delete(matchedEntry.otherReqId);
-    const sessionId = `call_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const partnerUser = store.users.find((u) => u.id === matchedEntry.userId);
-
-    res.json({
-      status: 'matched',
-      sessionId,
-      partner: {
-        id: partnerUser?.id || matchedEntry.userId,
-        alias: partnerUser?.alias || partnerUser?.name || 'Partner',
-        country: partnerUser?.country || 'Global',
-        level: partnerUser?.level || 'Intermediate'
-      }
-    });
-  } else {
-    pendingMatchRequests.set(requestId, {
-      userId: user.id,
-      timestamp: Date.now()
-    });
-
-    res.status(202).json({
-      status: 'queued',
-      requestId,
-      message: 'Entered random voice matching queue.'
-    });
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+    const decoded = verifyToken(token);
+    const user = store.users.find((item) => item.id === decoded.userId);
+    if (!user) throw new Error('Account not found');
+    socket.data.userId = user.id;
+    next();
+  } catch {
+    next(new Error('Authentication required'));
   }
 });
-
-app.delete(['/matches/:id', '/api/matches/:id'], (req, res) => {
-  pendingMatchRequests.delete(req.params.id);
-  res.json({ message: 'Match request cancelled or ended successfully.' });
-});
-
-// ===============================================================
-// 4. WORD GAME & VOCABULARY CONTENT (Section 10, 20)
-// ===============================================================
-
-// Get game questions across all 5 types (GET /games/questions)
-app.get(['/games/questions', '/api/games/questions'], (req, res) => {
-  const { type } = req.query;
-  let questions = WORD_GAME_BANK;
-
-  if (type && typeof type === 'string' && type.toLowerCase() !== 'all') {
-    questions = questions.filter((q) => q.type.toLowerCase() === type.toLowerCase());
-  }
-
-  // Client view: sanitize by withholding direct answer index
-  const clientQuestions = questions.map((q) => ({
-    id: q.id,
-    type: q.type,
-    prompt: q.prompt,
-    options: q.options,
-    difficulty: q.difficulty
-  }));
-
-  res.json({
-    total: clientQuestions.length,
-    gameTypes: ['Word Meaning', 'Fill in the Blank', 'Synonym / Antonym', 'Word Formation', 'Daily Challenge'],
-    questions: clientQuestions
-  });
-});
-
-// Record user game attempt & evaluate score (POST /games/attempts)
-app.post(['/games/attempts', '/api/games/attempts'], optionalAuth(store), (req, res) => {
-  const user = req.user || store.users.find((u) => u.id === req.body.userId) || store.users[0];
-  const { answers } = req.body;
-
-  const result = evaluateGameAttempt(user, answers || {});
-  save();
-
-  res.json({
-    attemptId: crypto.randomUUID(),
-    userId: user.id,
-    ...result
-  });
-});
-
-// Daily Challenge shortcut
-app.get(['/api/quiz/daily', '/quiz/daily'], (req, res) => {
-  res.json({
-    challengeId: DAILY_CHALLENGE.id,
-    date: DAILY_CHALLENGE.date,
-    wordOfTheDay: DAILY_CHALLENGE.wordOfTheDay,
-    theme: DAILY_CHALLENGE.theme,
-    questions: DAILY_CHALLENGE.questions.map((q) => ({
-      id: q.id,
-      type: q.type,
-      prompt: q.prompt,
-      options: q.options
-    }))
-  });
-});
-
-// ===============================================================
-// 5. COMMON PHRASES & FAVORITES (Section 11, 20)
-// ===============================================================
-
-// Fetch phrase library (GET /phrases)
-app.get(['/phrases', '/api/phrases'], (req, res) => {
-  const { category, search } = req.query;
-  let phrases = COMMON_PHRASES;
-
-  if (category && typeof category === 'string' && category.toLowerCase() !== 'all') {
-    phrases = phrases.filter((p) => p.category.toLowerCase() === category.toLowerCase());
-  }
-
-  if (search && typeof search === 'string' && search.trim()) {
-    const q = search.toLowerCase().trim();
-    phrases = phrases.filter(
-      (p) =>
-        p.phrase.toLowerCase().includes(q) ||
-        p.meaning.toLowerCase().includes(q) ||
-        p.example.toLowerCase().includes(q)
-    );
-  }
-
-  const categories = ['all', 'greetings', 'introductions', 'shopping', 'travel', 'work', 'interviews', 'education', 'everyday conversation'];
-
-  res.json({
-    total: phrases.length,
-    categories,
-    phrases
-  });
-});
-
-// Save favourite phrase (POST /phrases/:id/favourite and POST /phrases/bookmark)
-app.post(['/phrases/:id/favourite', '/api/phrases/:id/favourite', '/api/phrases/bookmark'], optionalAuth(store), (req, res) => {
-  const phraseId = req.params.id || req.body.phraseId;
-  const user = req.user || store.users.find((u) => u.id === req.body.userId) || store.users[0];
-
-  if (!user.savedPhrases) user.savedPhrases = [];
-
-  const exists = user.savedPhrases.includes(phraseId);
-  if (exists) {
-    user.savedPhrases = user.savedPhrases.filter((id) => id !== phraseId);
-  } else {
-    user.savedPhrases.push(phraseId);
-  }
-
-  save();
-  res.json({
-    phraseId,
-    favourited: !exists,
-    favourites: user.savedPhrases
-  });
-});
-
-// Get user's saved phrases
-app.get(['/phrases/favourites/:userId', '/api/phrases/favourites/:userId'], (req, res) => {
-  const user = store.users.find((u) => u.id === req.params.userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-
-  const favList = COMMON_PHRASES.filter((p) => (user.savedPhrases || []).includes(p.id));
-  res.json({ total: favList.length, favourites: favList });
-});
-
-// ===============================================================
-// 6. BLOCKING & SAFETY CONTROLS (Section 12, 20)
-// ===============================================================
-
-// Block a user (POST /blocks and POST /api/blocks)
-app.post(['/blocks', '/api/blocks'], optionalAuth(store), (req, res) => {
-  const user = req.user || store.users.find((u) => u.id === req.body.userId) || store.users[0];
-  const { targetUserId, reason } = req.body;
-
-  if (!targetUserId) {
-    return res.status(400).json({ error: 'targetUserId is required' });
-  }
-
-  if (!user.blockedUsers) user.blockedUsers = [];
-  if (!user.blockedUsers.includes(targetUserId)) {
-    user.blockedUsers.push(targetUserId);
-  }
-
-  const blockRecord = {
-    id: crypto.randomUUID(),
-    blockerId: user.id,
-    blockedId: targetUserId,
-    reason: reason || 'Inappropriate interaction',
-    timestamp: new Date().toISOString()
-  };
-  store.blocks.push(blockRecord);
-  logAuditEvent(user.id, 'USER_BLOCKED', targetUserId);
-  save();
-
-  res.status(201).json({
-    message: 'User blocked successfully. You will not be rematched with this account.',
-    blockRecord
-  });
-});
-
-// Get block list
-app.get(['/blocks/:userId', '/api/blocks/:userId'], (req, res) => {
-  const user = store.users.find((u) => u.id === req.params.userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json({ blockedUsers: user.blockedUsers || [] });
-});
-
-// Unblock a user
-app.delete(['/blocks/:userId/:targetId', '/api/blocks/:userId/:targetId'], (req, res) => {
-  const user = store.users.find((u) => u.id === req.params.userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-
-  user.blockedUsers = (user.blockedUsers || []).filter((id) => id !== req.params.targetId);
-  store.blocks = store.blocks.filter((b) => !(b.blockerId === user.id && b.blockedId === req.params.targetId));
-  save();
-
-  res.json({ message: 'User unblocked successfully.' });
-});
-
-// ===============================================================
-// 7. REFERRALS & SHARING (Section 15, 20)
-// ===============================================================
-
-// Claim invite token or referral code (POST /referrals/claim)
-app.post(['/referrals/claim', '/api/referrals/claim'], optionalAuth(store), (req, res) => {
-  const { referralCode, newUserId } = req.body;
-  if (!referralCode || typeof referralCode !== 'string') {
-    return res.status(400).json({ error: 'Valid referral code required.' });
-  }
-
-  const codeClean = referralCode.trim().toUpperCase();
-  const inviter = store.users.find(
-    (u) =>
-      (u.referralCode || '').toUpperCase() === codeClean ||
-      (u.referralCode || '').toUpperCase().startsWith(codeClean)
-  );
-
-  if (!inviter) {
-    return res.status(404).json({ error: 'Invalid or expired referral code.' });
-  }
-
-  if (inviter.id === newUserId) {
-    return res.status(400).json({ error: 'Self-referral is not permitted.' });
-  }
-
-  inviter.referredCount = (inviter.referredCount || 0) + 1;
-  logAuditEvent(inviter.id, 'REFERRAL_CLAIMED', newUserId || 'new_user');
-  save();
-
-  res.json({
-    status: 'qualified',
-    message: 'Referral attributed successfully.',
-    inviterAlias: inviter.alias || 'Partner'
-  });
-});
-
-// Get referral details for a user
-app.get(['/referrals/:userId', '/api/referrals/:userId'], (req, res) => {
-  const user = store.users.find((u) => u.id === req.params.userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-
-  res.json({
-    referralCode: user.referralCode,
-    referredLearners: user.referredCount || 0,
-    shareUrl: `https://bytalk.app/invite/${user.referralCode}`
-  });
-});
-
-// ===============================================================
-// 8. ADMIN AUDIT & MONITORING (Section 17, 19)
-// ===============================================================
-
-app.get(['/admin/audit', '/api/admin/audit'], (req, res) => {
-  res.json({ total: store.auditLogs.length, auditLogs: store.auditLogs.slice(-50).reverse() });
-});
-
-// Admin User Status Toggle (Suspend / Ban / Activate per Section 12 & 17)
-app.patch(['/admin/users/:id/status', '/api/admin/users/:id/status'], (req, res) => {
-  const user = store.users.find((u) => u.id === req.params.id);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  const { status } = req.body;
-  if (!['active', 'suspended', 'banned'].includes(status)) {
-    return res.status(400).json({ error: 'Status must be active, suspended, or banned.' });
-  }
-  user.status = status;
-  logAuditEvent('admin', `USER_${status.toUpperCase()}`, user.id);
-  save();
-  res.json({ message: `User status set to ${status}.`, user });
-});
-
-// Phrase CMS (Create & retire phrases per Section 17)
-app.post(['/admin/phrases', '/api/admin/phrases'], (req, res) => {
-  const { phrase, meaning, category, example } = req.body;
-  if (!phrase || !meaning) {
-    return res.status(400).json({ error: 'Phrase and meaning are required.' });
-  }
-  const newPhrase = {
-    id: `phr_cms_${Date.now()}`,
-    category: (category || 'everyday conversation').toLowerCase().trim(),
-    phrase: phrase.trim(),
-    meaning: meaning.trim(),
-    usage: 'Curated phrase entry.',
-    example: example?.trim() || phrase.trim()
-  };
-  COMMON_PHRASES.push(newPhrase);
-  logAuditEvent('admin', 'PHRASE_CREATED', newPhrase.id);
-  res.status(201).json({ message: 'Phrase added to library.', phrase: newPhrase });
-});
-
-app.delete(['/admin/phrases/:id', '/api/admin/phrases/:id'], (req, res) => {
-  const idx = COMMON_PHRASES.findIndex((p) => p.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Phrase not found.' });
-  const removed = COMMON_PHRASES.splice(idx, 1)[0];
-  logAuditEvent('admin', 'PHRASE_RETIRED', removed.id);
-  res.json({ message: 'Phrase retired successfully.', phrase: removed });
-});
-
-// Vocabulary Question CMS (Section 17: "Vocabulary CMS: Create, edit, publish and retire word-game questions")
-app.post(['/admin/questions', '/api/admin/questions'], (req, res) => {
-  const { type, prompt, options, answer, difficulty, explanation } = req.body;
-  if (!prompt || !Array.isArray(options) || options.length < 2 || answer === undefined) {
-    return res.status(400).json({ error: 'Prompt, options array (min 2), and correct answer index are required.' });
-  }
-  const newQuestion = {
-    id: `gm_cms_${Date.now()}`,
-    type: type || 'Word Meaning',
-    prompt: prompt.trim(),
-    options,
-    answer: Number(answer),
-    difficulty: difficulty || 'Intermediate',
-    explanation: explanation || 'Curated question.'
-  };
-  WORD_GAME_BANK.push(newQuestion);
-  logAuditEvent('admin', 'QUESTION_CREATED', newQuestion.id);
-  res.status(201).json({ message: 'Question added to game bank.', question: newQuestion });
-});
-
-app.delete(['/admin/questions/:id', '/api/admin/questions/:id'], (req, res) => {
-  const idx = WORD_GAME_BANK.findIndex((q) => q.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Question not found.' });
-  const removed = WORD_GAME_BANK.splice(idx, 1)[0];
-  logAuditEvent('admin', 'QUESTION_RETIRED', removed.id);
-  res.json({ message: 'Question retired successfully.', question: removed });
-});
-
-// Call Experience Feedback (Section 4 & 20 & 23: "submit optional experience feedback", "call ended/feedback")
-app.post(['/api/calls/feedback', '/calls/feedback'], optionalAuth(store), (req, res) => {
-  const userId = req.user?.id || req.body.userId || 'anonymous';
-  const { sessionId, partnerId, rating, audioQuality, tags, comment } = req.body;
-  if (!rating || rating < 1 || rating > 5) {
-    return res.status(400).json({ error: 'Rating between 1 and 5 is required.' });
-  }
-  const feedback = {
-    id: `fb_${crypto.randomUUID()}`,
-    userId,
-    sessionId: sessionId || null,
-    partnerId: partnerId || null,
-    rating: Number(rating),
-    audioQuality: audioQuality || 'good',
-    tags: Array.isArray(tags) ? tags : [],
-    comment: comment ? String(comment).slice(0, 300) : '',
-    submittedAt: new Date().toISOString()
-  };
-  if (!store.callFeedback) store.callFeedback = [];
-  store.callFeedback.push(feedback);
-  logAuditEvent(userId, 'CALL_FEEDBACK_SUBMITTED', sessionId || partnerId);
-  save();
-  res.status(201).json({ message: 'Thank you for your feedback! It helps improve matching quality.', feedback });
-});
-
-// Learner Private Notes (Section 4 & 14: "take private learning notes", "deletion of user-controlled notes")
-app.get(['/api/notes/:userId', '/notes/:userId'], optionalAuth(store), (req, res) => {
-  const userId = req.params.userId;
-  const userNotes = (store.notes || []).filter((n) => n.userId === userId);
-  res.json({ total: userNotes.length, notes: userNotes });
-});
-
-app.post(['/api/notes', '/notes'], optionalAuth(store), (req, res) => {
-  const userId = req.user?.id || req.body.userId || 'u1';
-  const { title, content, partnerAlias, category } = req.body;
-  if (!content || !content.trim()) {
-    return res.status(400).json({ error: 'Note content cannot be empty.' });
-  }
-  const note = {
-    id: `note_${crypto.randomUUID()}`,
-    userId,
-    title: title ? title.trim().slice(0, 100) : 'Practice Note',
-    content: content.trim(),
-    partnerAlias: partnerAlias || null,
-    category: category || 'Speaking Practice',
-    createdAt: new Date().toISOString()
-  };
-  if (!store.notes) store.notes = [];
-  store.notes.push(note);
-  logAuditEvent(userId, 'NOTE_CREATED', note.id);
-  save();
-  res.status(201).json(note);
-});
-
-app.delete(['/api/notes/:id', '/notes/:id'], (req, res) => {
-  if (!store.notes) store.notes = [];
-  const idx = store.notes.findIndex((n) => n.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ error: 'Note not found' });
-  const [removed] = store.notes.splice(idx, 1);
-  save();
-  res.json({ message: 'Note deleted successfully.', note: removed });
-});
-
-// Notification Preferences (Section 13: "consent, category toggles, quiet hours and unsubscribe controls")
-app.get(['/api/notifications/preferences/:userId', '/notifications/preferences/:userId'], (req, res) => {
-  const userId = req.params.userId;
-  const prefs = store.notificationPreferences?.[userId] || {
-    dailyReminders: true,
-    roomAlerts: true,
-    weeklyProgress: true,
-    quietHoursEnabled: false,
-    quietHoursStart: '22:00',
-    quietHoursEnd: '08:00'
-  };
-  res.json({ userId, preferences: prefs });
-});
-
-app.patch(['/api/notifications/preferences', '/notifications/preferences'], optionalAuth(store), (req, res) => {
-  const userId = req.user?.id || req.body.userId || 'u1';
-  if (!store.notificationPreferences) store.notificationPreferences = {};
-  store.notificationPreferences[userId] = {
-    ...(store.notificationPreferences[userId] || {
-      dailyReminders: true,
-      roomAlerts: true,
-      weeklyProgress: true,
-      quietHoursEnabled: false,
-      quietHoursStart: '22:00',
-      quietHoursEnd: '08:00'
-    }),
-    ...req.body
-  };
-  save();
-  res.json({ message: 'Notification preferences updated.', preferences: store.notificationPreferences[userId] });
-});
-
-// ===============================================================
-// 9. DASHBOARD AGGREGATED VIEW (Section 6, 14)
-// ===============================================================
-
-app.get(['/api/dashboard/:userId', '/dashboard/:userId'], (req, res) => {
-  const targetId = req.params.userId || 'u1';
-  const user = store.users.find((u) => u.id === targetId);
-
-  if (!user) return res.status(404).json({ error: 'User not found' });
-
-  const safePartners = store.users
-    .filter((u) => u.id !== targetId && u.online && !(user.blockedUsers || []).includes(u.id))
-    .slice(0, 5)
-    .map((u) => {
-      const { passwordHash, ...safe } = u;
-      return safe;
-    });
-
-  const { passwordHash, ...safeProfile } = user;
-
-  res.json({
-    user: safeProfile,
-    stats: {
-      streak: user.streak || 0,
-      minutes: user.minutes || 0,
-      words: user.words || 0,
-      quizzesCompleted: user.quizzesCompleted || 0,
-      savedPhrasesCount: (user.savedPhrases || []).length
-    },
-    wordOfTheDay: DAILY_CHALLENGE.wordOfTheDay,
-    quickActionPhrases: COMMON_PHRASES.slice(0, 4),
-    activeRooms: store.rooms.slice(0, 4),
-    availablePartners: safePartners
-  });
-});
-
-// ===============================================================
-// 10. SOCKET.IO & WEBRTC SIGNALING (Section 7, 8, 9, 18, 20)
-// ===============================================================
 
 io.on('connection', (socket) => {
-  console.log(`[Socket.IO] Client connected: ${socket.id} (Transport: ${socket.conn.transport.name})`);
+  const userId = socket.data.userId;
+  console.log(`Socket connected for user ${userId}.`);
+  const sockets = userSockets.get(userId) || new Set();
+  const wasOnline = sockets.size > 0;
+  sockets.add(socket.id);
+  userSockets.set(userId, sockets);
+  socket.join(`user:${userId}`);
+  if (!wasOnline) io.emit('presence:update', { userId, online: true });
 
-  socket.on('disconnect', (reason) => {
-    console.log(`[Socket.IO] Client disconnected: ${socket.id} (Reason: ${reason})`);
-  });
+  const ongoingCallId = userCalls.get(userId);
+  if (ongoingCallId) {
+    const call = activeCalls.get(ongoingCallId);
+    if (call) {
+      emitToUser(call.callerId, 'call:state', { callId: call.id, status: 'reconnecting' });
+      emitToUser(call.calleeId, 'call:state', { callId: call.id, status: 'reconnecting' });
+    }
+  }
 
   socket.on('ping:app', () => socket.emit('pong:app'));
+
+  socket.on('typing:start', ({ to } = {}) => {
+    if (typeof to === 'string' && to !== userId && store.users.some((user) => user.id === to)) {
+      emitToUser(to, 'typing:update', { from: userId, typing: true });
+    }
+  });
+
+  socket.on('typing:stop', ({ to } = {}) => {
+    if (typeof to === 'string' && to !== userId) {
+      emitToUser(to, 'typing:update', { from: userId, typing: false });
+    }
+  });
+
+  socket.on('call:invite', ({ to, type } = {}, acknowledge = () => {}) => {
+    console.log(`Call invite received from ${userId} to ${to} (${type}).`);
+    if (typeof acknowledge !== 'function') return;
+    if (typeof to !== 'string' || to === userId || !['audio', 'video'].includes(type)) {
+      acknowledge({ error: 'Invalid call request' });
+      return;
+    }
+    if (!store.users.some((user) => user.id === to)) {
+      acknowledge({ error: 'User not found' });
+      return;
+    }
+    if (!(userSockets.get(to)?.size || 0)) {
+      console.log(`Call invite rejected: recipient ${to} is offline.`);
+      acknowledge({ error: 'This person is offline' });
+      return;
+    }
+    if (userCalls.has(userId) || userCalls.has(to)) {
+      acknowledge({ error: 'One of you is already on another call' });
+      return;
+    }
+
+    const createdAt = new Date().toISOString();
+    const call = {
+      id: crypto.randomUUID(),
+      callerId: userId,
+      calleeId: to,
+      type,
+      status: 'ringing',
+      createdAt,
+    };
+    activeCalls.set(call.id, call);
+    userCalls.set(userId, call.id);
+    userCalls.set(to, call.id);
+    saveCall(call);
+
+    const caller = store.users.find((user) => user.id === userId);
+    emitToUser(to, 'call:incoming', {
+      callId: call.id,
+      type,
+      createdAt,
+      caller: sanitizeUser(caller),
+    });
+    console.log(`Call ${call.id} is ringing for ${to}.`);
+    acknowledge({ callId: call.id, status: 'ringing' });
+    armCallTimeout(call, 'ringing', 35000, () => {
+      finishCall(call, 'missed', null);
+      emitToUser(call.callerId, 'call:missed', { callId: call.id, status: 'missed' });
+      emitToUser(call.calleeId, 'call:ended', { callId: call.id, status: 'missed' });
+    });
+  });
+
+  socket.on('call:accept', ({ callId } = {}, acknowledge = () => {}) => {
+    console.log(`Call accept received from ${userId} for ${callId}.`);
+    const call = activeCalls.get(callId);
+    if (!call || call.calleeId !== userId || call.status !== 'ringing') {
+      acknowledge({ error: 'This call is no longer available' });
+      return;
+    }
+    const timer = callTimers.get(call.id);
+    if (timer) clearTimeout(timer);
+    callTimers.delete(call.id);
+    call.status = 'connecting';
+    call.acceptedAt = new Date().toISOString();
+    saveCall(call);
+    emitToUser(call.callerId, 'call:accepted', { callId: call.id, status: 'connecting' });
+    acknowledge({ ok: true });
+    armCallTimeout(call, 'connecting', 45000, () => {
+      finishCall(call, 'failed', null);
+      emitToUser(call.callerId, 'call:ended', { callId: call.id, status: 'failed', reason: 'connection-timeout' });
+      emitToUser(call.calleeId, 'call:ended', { callId: call.id, status: 'failed', reason: 'connection-timeout' });
+    });
+  });
+
+  socket.on('call:reject', ({ callId } = {}, acknowledge = () => {}) => {
+    console.log(`Call reject received from ${userId} for ${callId}.`);
+    const call = activeCalls.get(callId);
+    if (!call || call.calleeId !== userId || call.status !== 'ringing') {
+      acknowledge({ error: 'This call is no longer available' });
+      return;
+    }
+    finishCall(call, 'rejected', userId);
+    emitToUser(call.callerId, 'call:rejected', { callId: call.id, status: 'rejected' });
+    emitToUser(call.calleeId, 'call:ended', { callId: call.id, status: 'rejected' });
+    acknowledge({ ok: true });
+  });
+
+  socket.on('call:signal', ({ callId, kind, signal } = {}, acknowledge = () => {}) => {
+    const call = activeCalls.get(callId);
+    const recipientId = call && participantForCall(call, userId);
+    const validKind = ['offer', 'answer', 'ice'].includes(kind);
+    const validRole = (kind !== 'offer' || call?.callerId === userId)
+      && (kind !== 'answer' || call?.calleeId === userId);
+    let payloadSize = Infinity;
+    try {
+      payloadSize = JSON.stringify(signal).length;
+    } catch {}
+    if (!call || call.status === 'ringing' || !recipientId || !validKind || !validRole || !signal || payloadSize > 100000) {
+      acknowledge({ error: 'Invalid or unauthorized call signal' });
+      return;
+    }
+    emitToUser(recipientId, 'call:signal', { callId, kind, signal });
+    acknowledge({ ok: true });
+  });
+
+  socket.on('call:connected', ({ callId } = {}) => {
+    const call = activeCalls.get(callId);
+    if (!call || !participantForCall(call, userId) || call.status === 'ringing') return;
+    for (const participantId of [call.callerId, call.calleeId]) {
+      const reconnectTimer = callTimers.get(`disconnect:${call.id}:${participantId}`);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      callTimers.delete(`disconnect:${call.id}:${participantId}`);
+    }
+    if (!call.connectedAt) {
+      const timer = callTimers.get(call.id);
+      if (timer) clearTimeout(timer);
+      callTimers.delete(call.id);
+      call.connectedAt = new Date().toISOString();
+      call.status = 'connected';
+      saveCall(call);
+    }
+    emitToUser(call.callerId, 'call:state', { callId, status: 'connected', connectedAt: call.connectedAt });
+    emitToUser(call.calleeId, 'call:state', { callId, status: 'connected', connectedAt: call.connectedAt });
+  });
+
+  socket.on('call:end', ({ callId } = {}, acknowledge = () => {}) => {
+    const call = activeCalls.get(callId);
+    if (!call || !participantForCall(call, userId)) {
+      acknowledge({ error: 'This call is no longer available' });
+      return;
+    }
+    finishCall(call, call.status === 'ringing' ? 'cancelled' : 'ended', userId);
+    const ended = { callId, status: call.status, endedBy: userId };
+    emitToUser(call.callerId, 'call:ended', ended);
+    emitToUser(call.calleeId, 'call:ended', ended);
+    acknowledge({ ok: true });
+  });
+
+  socket.on('disconnect', () => {
+    const currentSockets = userSockets.get(userId);
+    currentSockets?.delete(socket.id);
+    if (currentSockets?.size) return;
+    userSockets.delete(userId);
+    io.emit('presence:update', { userId, online: false });
+
+    const callId = userCalls.get(userId);
+    const call = activeCalls.get(callId);
+    if (call) {
+      const otherUserId = participantForCall(call, userId);
+      emitToUser(otherUserId, 'call:state', { callId, status: 'reconnecting' });
+      const timerKey = `disconnect:${call.id}:${userId}`;
+      const timer = setTimeout(() => {
+        if (!activeCalls.has(callId) || (userSockets.get(userId)?.size || 0)) return;
+        finishCall(call, 'ended', userId);
+        const ended = { callId, status: 'ended', reason: 'disconnected' };
+        emitToUser(call.callerId, 'call:ended', ended);
+        emitToUser(call.calleeId, 'call:ended', ended);
+      }, 30000);
+      timer.unref?.();
+      callTimers.set(timerKey, timer);
+    }
+  });
 });
 
-// Initialize full WebRTC audio signaling, matchmaking, and room stage management
-setupSignaling(io, store, save);
-
-// Global 404 handler for undefined API routes
-app.use((req, res) => {
-  res.status(404).json({ error: 'Endpoint not found', path: req.originalUrl, service: 'BYTALK API' });
-});
-
-// Global error-handling middleware
-app.use((err, req, res, next) => {
-  console.error('[Unhandled Error]', err);
-  res.status(err.status || 500).json({ error: err.message || 'Internal Server Error' });
-});
-
-// Start server
 const port = Number(process.env.PORT || 4000);
-httpServer.listen(port, '0.0.0.0', () =>
-  console.log(`BYTALK backend running on http://localhost:${port}`)
-);
+httpServer.listen(port, '0.0.0.0', () => console.log(`BYTALK backend running on http://localhost:${port}`));
