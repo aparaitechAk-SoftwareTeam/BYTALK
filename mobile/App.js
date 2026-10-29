@@ -22,7 +22,9 @@ import { io } from 'socket.io-client';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { LinearGradient } from 'expo-linear-gradient';
 import { createPeerConnection, getLocalMediaStream, makeIceCandidate, makeSessionDescription, setAudioRoute, startAudioRoute, stopAudioRoute, switchCamera } from './rtc';
+import CallAudio from './CallAudio';
 import CallVideo from './CallVideo';
+import { connectLiveRoom } from './src/liveRoom';
 
 const welcomeImage = require('./assets/bytalk-welcome-art.png');
 
@@ -194,6 +196,40 @@ const fallbackRooms = [
   { id: 'r4', name: 'Language exchange', topic: 'Study', level: 'Beginner - Intermediate', listeners: 12 },
 ];
 
+const LANGUAGES = [
+  'English', 'Hindi', 'Marathi', 'Spanish', 'French', 'Japanese',
+  'Mandarin Chinese', 'Arabic', 'German', 'Portuguese', 'Bengali',
+  'Russian', 'Urdu', 'Indonesian', 'Korean', 'Italian', 'Turkish',
+  'Tamil', 'Telugu', 'Vietnamese', 'Polish', 'Dutch', 'Greek',
+  'Hebrew', 'Thai', 'Swedish', 'Czech', 'Hungarian', 'Romanian',
+  'Danish', 'Finnish', 'Norwegian', 'Swahili', 'Malay', 'Ukrainian',
+];
+
+const COUNTRY_CODES = [
+  'AF', 'AL', 'DZ', 'AD', 'AO', 'AG', 'AR', 'AM', 'AU', 'AT', 'AZ', 'BS', 'BH', 'BD', 'BB', 'BY', 'BE',
+  'BZ', 'BJ', 'BT', 'BO', 'BA', 'BW', 'BR', 'BN', 'BG', 'BF', 'BI', 'CV', 'KH', 'CM', 'CA', 'CF', 'TD',
+  'CL', 'CN', 'CO', 'KM', 'CG', 'CD', 'CR', 'CI', 'HR', 'CU', 'CY', 'CZ', 'DK', 'DJ', 'DM', 'DO', 'EC',
+  'EG', 'SV', 'GQ', 'ER', 'EE', 'SZ', 'ET', 'FJ', 'FI', 'FR', 'GA', 'GM', 'GE', 'DE', 'GH', 'GR', 'GD',
+  'GT', 'GN', 'GW', 'GY', 'HT', 'HN', 'HU', 'IS', 'IN', 'ID', 'IR', 'IQ', 'IE', 'IL', 'IT', 'JM', 'JP',
+  'JO', 'KZ', 'KE', 'KI', 'KP', 'KR', 'KW', 'KG', 'LA', 'LV', 'LB', 'LS', 'LR', 'LY', 'LI', 'LT', 'LU',
+  'MG', 'MW', 'MY', 'MV', 'ML', 'MT', 'MH', 'MR', 'MU', 'MX', 'FM', 'MD', 'MC', 'MN', 'ME', 'MA', 'MZ',
+  'MM', 'NA', 'NR', 'NP', 'NL', 'NZ', 'NI', 'NE', 'NG', 'MK', 'NO', 'OM', 'PK', 'PW', 'PA', 'PG', 'PY',
+  'PE', 'PH', 'PL', 'PT', 'QA', 'RO', 'RU', 'RW', 'KN', 'LC', 'VC', 'WS', 'SM', 'ST', 'SA', 'SN', 'RS',
+  'SC', 'SL', 'SG', 'SK', 'SI', 'SB', 'SO', 'ZA', 'SS', 'ES', 'LK', 'SD', 'SR', 'SE', 'CH', 'SY', 'TW',
+  'TJ', 'TZ', 'TH', 'TL', 'TG', 'TO', 'TT', 'TN', 'TR', 'TM', 'TV', 'UG', 'UA', 'AE', 'GB', 'US', 'UY',
+  'UZ', 'VU', 'VA', 'VE', 'VN', 'YE', 'ZM', 'ZW',
+];
+
+const COUNTRY_OPTIONS = (() => {
+  try {
+    const displayNames = new Intl.DisplayNames(['en'], { type: 'region' });
+    return COUNTRY_CODES.map((code) => ({ code, name: displayNames.of(code) || code }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+  } catch {
+    return COUNTRY_CODES.map((code) => ({ code, name: code }));
+  }
+})();
+
 async function request(endpoint, options = {}) {
   const headers = {
     'Content-Type': 'application/json',
@@ -274,6 +310,73 @@ const Btn = ({ label, onPress, outline = false, disabled = false, loading = fals
   </TouchableOpacity>
 );
 
+function SearchSelect({ label, value, options, onSelect, placeholder }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const filtered = options.filter((option) => {
+    const name = typeof option === 'string' ? option : option.name;
+    return name.toLowerCase().includes(query.trim().toLowerCase());
+  });
+
+  return (
+    <View style={{ marginBottom: 15, zIndex: open ? 2 : 1 }}>
+      <Txt size={13} bold style={{ marginBottom: 8 }}>{label}</Txt>
+      <TouchableOpacity
+        accessibilityRole="button"
+        accessibilityLabel={`${label} selector`}
+        onPress={() => {
+          setOpen((current) => !current);
+          setQuery('');
+        }}
+        style={{
+          backgroundColor: '#fff',
+          borderColor: open ? orange : border,
+          borderWidth: 1,
+          borderRadius: 14,
+          padding: 15,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}
+      >
+        <Txt color={value ? navy : '#9CA3AF'} size={15}>{value || placeholder}</Txt>
+        <Ionicons name={open ? 'chevron-up' : 'chevron-down'} size={18} color={muted} />
+      </TouchableOpacity>
+      {open && (
+        <View style={{ backgroundColor: '#fff', borderColor: border, borderWidth: 1, borderRadius: 14, marginTop: 6, overflow: 'hidden' }}>
+          <TextInput
+            autoFocus
+            value={query}
+            onChangeText={setQuery}
+            placeholder={`Search ${label.toLowerCase()}...`}
+            placeholderTextColor="#9CA3AF"
+            style={{ padding: 12, borderBottomWidth: 1, borderBottomColor: border, color: navy }}
+          />
+          <ScrollView nestedScrollEnabled style={{ maxHeight: 190 }}>
+            {filtered.map((option) => {
+              const optionName = typeof option === 'string' ? option : option.name;
+              return (
+                <TouchableOpacity
+                  key={typeof option === 'string' ? option : option.code}
+                  onPress={() => {
+                    onSelect(optionName);
+                    setOpen(false);
+                    setQuery('');
+                  }}
+                  style={{ paddingHorizontal: 14, paddingVertical: 11, backgroundColor: optionName === value ? '#FFF0E8' : '#fff' }}
+                >
+                  <Txt color={optionName === value ? orange : navy} bold={optionName === value}>{optionName}</Txt>
+                </TouchableOpacity>
+              );
+            })}
+            {!filtered.length && <Txt color={muted} size={13} style={{ padding: 14 }}>No matching options.</Txt>}
+          </ScrollView>
+        </View>
+      )}
+    </View>
+  );
+}
+
 const Section = ({ title, children }) => (
   <View style={{ marginBottom: 22 }}>
     <Txt size={16} bold style={{ marginBottom: 12 }}>{title}</Txt>
@@ -298,9 +401,17 @@ function App() {
   const [discoverRefreshing, setDiscoverRefreshing] = useState(false);
   const [discoverError, setDiscoverError] = useState('');
   const [rooms, setRooms] = useState(fallbackRooms);
+  const [activeRoom, setActiveRoom] = useState(null);
+  const [roomParticipants, setRoomParticipants] = useState([]);
+  const [roomStatus, setRoomStatus] = useState('idle');
+  const [roomError, setRoomError] = useState('');
+  const [roomMuted, setRoomMuted] = useState(false);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState({ id: null, name: 'BYTALK' });
   const [messages, setMessages] = useState([]);
+  const [unreadByUser, setUnreadByUser] = useState({});
+  const [conversations, setConversations] = useState([]);
+  const [messageBanner, setMessageBanner] = useState(null);
   const [draft, setDraft] = useState('');
   const [filter, setFilter] = useState('All');
   const [vocab, setVocab] = useState([]);
@@ -325,19 +436,29 @@ function App() {
   const [callNotice, setCallNotice] = useState('');
   const [callStarting, setCallStarting] = useState(null);
   const socketRef = useRef(null);
+  const liveRoomRef = useRef(null);
+  const activeRoomRef = useRef(null);
   const peerRef = useRef(null);
   const callRef = useRef(null);
   const localStreamRef = useRef(null);
   const iceServersRef = useRef([]);
   const pendingIceRef = useRef([]);
+  const pendingOutgoingIceRef = useRef([]);
+  const signalQueueRef = useRef(Promise.resolve());
   const selectedRef = useRef(selected);
+  const userIdRef = useRef(userId);
+  const screenRef = useRef(screen);
   const typingTimerRef = useRef(null);
   const callExitTimerRef = useRef(null);
   const partnersRef = useRef(partners);
   const discoverRequestRef = useRef(0);
+  const seenMessageIdsRef = useRef(new Set());
   selectedRef.current = selected;
+  userIdRef.current = userId;
+  screenRef.current = screen;
   callRef.current = call;
   partnersRef.current = partners;
+  activeRoomRef.current = activeRoom;
 
   // Auth form states
   const [loginEmail, setLoginEmail] = useState('');
@@ -380,6 +501,10 @@ function App() {
           request('rooms'),
           activeAuthToken ? request(`vocabulary/${userId}`).catch(() => []) : Promise.resolve([]),
         ]);
+        console.log('[BYTALK room] API state', {
+          roomCount: Array.isArray(r) ? r.length : 0,
+          mediaAvailable: Array.isArray(r) ? r.filter((room) => room.mediaAvailable).length : 0,
+        });
         setRooms(r);
         setVocab(v);
         if (activeAuthToken) await loadDiscoverUsers(true);
@@ -440,8 +565,10 @@ function App() {
       connection.oniceconnectionstatechange = null;
       connection.close();
     }
+
     peerRef.current = null;
     pendingIceRef.current = [];
+    pendingOutgoingIceRef.current = [];
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
     setLocalStream(null);
@@ -452,33 +579,125 @@ function App() {
     setSpeakerEnabled(false);
   }
 
+  function updateRoomList(roomId, participants) {
+    if (!roomId) return;
+    setRooms((previous) => previous.map((room) => room.id === roomId
+      ? { ...room, participants: participants.length, mediaAvailable: room.mediaAvailable }
+      : room));
+    if (activeRoomRef.current?.id === roomId) setRoomParticipants(participants);
+  }
+
+  async function notifyIncomingMessage(message) {
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || !('Notification' in window)) return;
+    try {
+      if (Notification.permission === 'granted' && document.hidden) {
+        new Notification('New BYTALK message', { body: String(message.text || '').slice(0, 120) });
+      }
+    } catch (error) {
+      console.warn('[BYTALK notification] unavailable', error?.message || 'permission denied');
+    }
+  }
+
+  function refreshConversations() {
+    return request('messages/conversations')
+      .then(setConversations)
+      .catch((error) => console.warn('[BYTALK message] conversation list failed', error.message));
+  }
+
+  function conversationForMessage(message) {
+    const partner = partnersRef.current.find((item) => item.id === message.from);
+    return {
+      id: message.from,
+      name: partner?.name || partner?.displayName || 'BYTALK user',
+      displayName: partner?.displayName || partner?.name || 'BYTALK user',
+      avatarUrl: partner?.avatarUrl || null,
+      country: partner?.country || '',
+      learningLanguage: partner?.learningLanguage || '',
+      online: Boolean(partner?.online),
+    };
+  }
+
+  function openConversation(partner) {
+    setSelected(partner);
+    setChatError('');
+    setMessageBanner(null);
+    setScreen('chat');
+  }
+
+  async function requestNotificationPermission() {
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || !('Notification' in window)) return;
+    if (Notification.permission !== 'default') return;
+    try {
+      await Notification.requestPermission();
+    } catch (error) {
+      console.warn('[BYTALK notification] permission request unavailable', error?.message || 'permission denied');
+    }
+  }
+
+  async function notifyIncomingCall(incoming) {
+    if (Platform.OS !== 'web' || typeof window === 'undefined' || !('Notification' in window)) return;
+    try {
+      if (Notification.permission === 'default') await Notification.requestPermission();
+      if (Notification.permission === 'granted' && document.hidden) {
+        new Notification(`Incoming ${incoming.type} call`, {
+          body: `${incoming.caller?.name || 'A BYTALK user'} is calling you.`,
+        });
+      }
+    } catch (error) {
+      console.warn('[BYTALK notification] incoming call unavailable', error?.message || 'permission denied');
+    }
+  }
+
   function createCallPeer(callId, stream, iceServers) {
     const connection = createPeerConnection(iceServers);
+    console.log('[BYTALK call] peer created', {
+      callId,
+      iceServerCount: iceServers.length,
+      audioTracks: stream.getAudioTracks().length,
+      videoTracks: stream.getVideoTracks().length,
+    });
     stream.getTracks().forEach((track) => connection.addTrack(track, stream));
     peerRef.current = { callId, connection };
     connection.onicecandidate = (event) => {
-      if (event.candidate && peerRef.current?.callId) {
-        socketRef.current?.emit('call:signal', {
-          callId: peerRef.current.callId,
-          kind: 'ice',
-          signal: event.candidate.toJSON ? event.candidate.toJSON() : event.candidate,
-        });
+      if (!event.candidate) return;
+      const candidate = event.candidate.toJSON ? event.candidate.toJSON() : event.candidate;
+      const callIdForCandidate = peerRef.current?.callId;
+      if (!callIdForCandidate) {
+        pendingOutgoingIceRef.current.push(candidate);
+        return;
       }
+      console.log('[BYTALK call] signaling ICE candidate', { callId: callIdForCandidate });
+      socketRef.current?.emit('call:signal', {
+        callId: callIdForCandidate,
+        kind: 'ice',
+        signal: candidate,
+      }, (response) => {
+        if (response?.error) {
+          console.warn('[BYTALK call] ICE candidate rejected', response.error);
+        }
+      });
     };
     connection.ontrack = (event) => {
+      console.log('[BYTALK call] remote track received', { callId: peerRef.current?.callId, kind: event.track?.kind });
       if (event.streams?.[0]) setRemoteStream(event.streams[0]);
     };
     const updateConnectionState = () => {
-      const state = connection.connectionState || connection.iceConnectionState;
-      if (state === 'connected' || state === 'completed') {
+      const state = connection.connectionState;
+      const iceState = connection.iceConnectionState;
+      console.log('[BYTALK call] peer state', { callId: peerRef.current?.callId, state, iceState });
+      const mediaConnected = state === 'connected'
+        || ((iceState === 'connected' || iceState === 'completed') && !['failed', 'closed'].includes(state));
+      if (mediaConnected) {
         updateCall((previous) => previous ? { ...previous, status: 'Connected', connectedAt: previous.connectedAt || new Date().toISOString() } : previous);
         socketRef.current?.emit('call:connected', { callId: peerRef.current?.callId });
-      } else if (state === 'disconnected' || state === 'checking') {
+      } else if (state === 'disconnected' || iceState === 'disconnected') {
         updateCall((previous) => previous ? { ...previous, status: 'Reconnecting' } : previous);
-      } else if (state === 'failed') {
+      } else if (state === 'failed' || iceState === 'failed') {
         const notice = 'The media connection failed. Check your network or TURN server configuration.';
         setCallNotice(notice);
         endCall(notice);
+      } else if (state === 'connecting' || iceState === 'checking') {
+        updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
       }
     };
     connection.onconnectionstatechange = updateConnectionState;
@@ -492,6 +711,7 @@ function App() {
       if (!connection || peerRef.current.callId !== callId) return;
       const offer = await connection.createOffer();
       await connection.setLocalDescription(offer);
+      console.log('[BYTALK call] signaling offer', { callId });
       socketRef.current?.emit('call:signal', { callId, kind: 'offer', signal: connection.localDescription || offer });
       updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
     } catch (error) {
@@ -499,9 +719,10 @@ function App() {
     }
   }
 
-  async function handleCallSignal({ callId, kind, signal }) {
+  async function processCallSignal({ callId, kind, signal }) {
     const connection = peerRef.current?.connection;
     if (!connection || peerRef.current.callId !== callId) return;
+    console.log('[BYTALK call] signaling received', { callId, kind });
     try {
       if (kind === 'offer') {
         await connection.setRemoteDescription(makeSessionDescription(signal));
@@ -510,6 +731,7 @@ function App() {
         }
         const answer = await connection.createAnswer();
         await connection.setLocalDescription(answer);
+        console.log('[BYTALK call] signaling answer', { callId });
         socketRef.current?.emit('call:signal', { callId, kind: 'answer', signal: connection.localDescription || answer });
         updateCall((previous) => previous ? { ...previous, status: 'Connecting' } : previous);
       } else if (kind === 'answer') {
@@ -527,6 +749,12 @@ function App() {
     } catch (error) {
       setCallNotice(error.message || 'Could not negotiate the media connection.');
     }
+  }
+
+  function handleCallSignal(signal) {
+    signalQueueRef.current = signalQueueRef.current
+      .catch(() => {})
+      .then(() => processCallSignal(signal));
   }
 
   function finishCallLocally(status, notice = '') {
@@ -605,6 +833,18 @@ function App() {
         return;
       }
       peerRef.current.callId = result.callId;
+      const queuedCandidates = pendingOutgoingIceRef.current.splice(0);
+      for (const candidate of queuedCandidates) {
+        socketRef.current?.emit('call:signal', {
+          callId: result.callId,
+          kind: 'ice',
+          signal: candidate,
+        }, (response) => {
+          if (response?.error) {
+            console.warn('[BYTALK call] queued ICE candidate rejected', response.error);
+          }
+        });
+      }
       updateCall((previous) => previous ? { ...previous, id: result.callId, status: 'Ringing' } : previous);
     } catch (error) {
       console.warn('[BYTALK call] failed', error.message || error);
@@ -740,11 +980,26 @@ function App() {
     async function connectSocket() {
       const token = activeAuthToken || await authStorage.getItem(SESSION_TOKEN_KEY);
       if (!active || !token) return;
-      socket = io(API, { auth: { token }, transports: ['websocket', 'polling'] });
+      socket = io(API, { auth: { token }, transports: ['websocket', 'polling'], autoConnect: false });
       socketRef.current = socket;
       socket.on('connect', () => {
         console.log('[BYTALK socket] connected', { api: API });
         loadDiscoverUsers();
+        request('messages/unread')
+          .then(setUnreadByUser)
+          .catch((error) => console.warn('[BYTALK message] unread count failed', error.message));
+        refreshConversations();
+        if (screenRef.current === 'chat' && selectedRef.current.id && userIdRef.current) {
+          request(`messages/${userIdRef.current}/${selectedRef.current.id}?limit=100`)
+            .then((history) => {
+              setMessages((previous) => {
+                const merged = new Map(previous.map((message) => [message.id, message]));
+                history.forEach((message) => merged.set(message.id, message));
+                return [...merged.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+              });
+            })
+            .catch((error) => console.warn('[BYTALK message] reconnect history refresh failed', error.message));
+        }
         const connection = peerRef.current?.connection;
         if (callRef.current?.id && connection?.connectionState === 'connected') {
           socket.emit('call:connected', { callId: callRef.current.id });
@@ -755,23 +1010,85 @@ function App() {
         if (active) setChatError(error.message || 'Could not connect to messaging.');
         if (active) setCallNotice(`Call service unavailable: ${error.message || 'connection failed'}`);
       });
+      socket.on('disconnect', (reason) => {
+        console.warn('[BYTALK socket] disconnected', { reason });
+        if (activeRoomRef.current) {
+          liveRoomRef.current?.disconnect();
+          liveRoomRef.current = null;
+          setActiveRoom(null);
+          setRoomParticipants([]);
+          setRoomStatus('error');
+          setRoomError(`Live room disconnected: ${reason}`);
+        }
+      });
+      socket.on('error', (error) => {
+        console.warn('[BYTALK socket] error', error?.message || 'unknown error');
+      });
       socket.on('message:new', (message) => {
-        if (message.from !== userId && message.to !== userId) return;
-        setMessages((previous) => previous.some((item) => item.id === message.id) ? previous : [...previous, message]);
+        try {
+          const currentUserId = userIdRef.current;
+          const recipientId = String(message.to || '');
+          const senderId = String(message.from || '');
+          if (recipientId !== String(currentUserId || '') || senderId === String(currentUserId || '')) return;
+          if (seenMessageIdsRef.current.has(message.id)) return;
+          seenMessageIdsRef.current.add(message.id);
+          const openConversation = screenRef.current === 'chat' && String(selectedRef.current.id) === senderId;
+          const sender = conversationForMessage(message);
+          console.log('[BYTALK message] received', { messageId: message.id, from: senderId, to: recipientId, openConversation });
+          setMessages((previous) => previous.some((item) => item.id === message.id) ? previous : [...previous, message]);
+          setConversations((previous) => [
+            {
+              user: sender,
+              latestMessage: message,
+              unreadCount: openConversation ? 0 : (previous.find((item) => item.user.id === senderId)?.unreadCount || 0) + 1,
+            },
+            ...previous.filter((item) => item.user.id !== senderId),
+          ]);
+          if (!openConversation) {
+            setUnreadByUser((previous) => ({ ...previous, [senderId]: (previous[senderId] || 0) + 1 }));
+            setMessageBanner({ ...message, sender });
+            notifyIncomingMessage(message);
+          } else {
+            request(`messages/${currentUserId}/${senderId}?limit=100`)
+              .catch((error) => console.warn('[BYTALK message] read update failed', error.message));
+            refreshConversations();
+          }
+        } catch (error) {
+          console.warn('[BYTALK message] listener failed', error?.message || 'invalid message event');
+        }
       });
       socket.on('message:status', (status) => {
         setMessages((previous) => previous.map((message) => message.id === status.id ? { ...message, ...status } : message));
+        refreshConversations();
       });
       socket.on('rooms:changed', setRooms);
+      socket.on('room:state', ({ roomId, participants }) => {
+        console.log('[BYTALK room] state', { roomId, participantCount: participants?.length || 0 });
+        updateRoomList(roomId, participants || []);
+      });
+      socket.on('room:participant-joined', ({ roomId, participant }) => {
+        console.log('[BYTALK room] participant joined', { roomId, participantId: participant?.id });
+      });
+      socket.on('room:participant-left', ({ roomId, userId: changedUserId }) => {
+        console.log('[BYTALK room] participant left', { roomId, userId: changedUserId });
+      });
       socket.on('presence:update', ({ userId: changedId, online }) => {
+        console.log('[BYTALK presence] update', { userId: changedId, online });
         setPartners((previous) => previous.map((partner) => partner.id === changedId ? { ...partner, online } : partner));
         setSelected((previous) => previous.id === changedId ? { ...previous, online } : previous);
+      });
+      socket.on('presence:state', (onlineUserIds) => {
+        const online = new Set((onlineUserIds || []).map(String));
+        console.log('[BYTALK presence] snapshot', { count: online.size });
+        setPartners((previous) => previous.map((partner) => ({ ...partner, online: online.has(String(partner.id)) })));
+        setSelected((previous) => previous.id ? { ...previous, online: online.has(String(previous.id)) } : previous);
       });
       socket.on('typing:update', ({ from, typing: isTyping }) => {
         if (from === selectedRef.current.id) setTyping(Boolean(isTyping));
       });
       socket.on('call:incoming', (incoming) => {
         console.log('[BYTALK call] incoming call received', { callId: incoming.callId, type: incoming.type });
+        if (callRef.current?.id === incoming.callId) return;
         const peer = partnersRef.current.find((partner) => partner.id === incoming.caller.id) || incoming.caller;
         setSelected(peer);
         updateCall({
@@ -783,14 +1100,21 @@ function App() {
         });
         setCallNotice('');
         setScreen('call');
+        notifyIncomingCall(incoming);
       });
       socket.on('call:accepted', ({ callId }) => {
-        console.log('[BYTALK call] call accepted', { callId });
+        console.log('[BYTALK call] call accepted', { callId, userId });
         if (callRef.current?.id === callId) createCallOffer(callId);
       });
       socket.on('call:signal', (signal) => handleCallSignal(signal));
       socket.on('call:state', ({ callId, status, connectedAt }) => {
         if (callRef.current?.id !== callId) return;
+        const connection = peerRef.current?.connection;
+        const locallyConnected = connection?.connectionState === 'connected'
+          || connection?.iceConnectionState === 'connected'
+          || connection?.iceConnectionState === 'completed';
+        console.log('[BYTALK call] server call state', { callId, status, locallyConnected });
+        if (status === 'connected' && !locallyConnected) return;
         const title = status === 'connected' ? 'Connected' : 'Reconnecting';
         updateCall((previous) => previous ? { ...previous, status: title, connectedAt: connectedAt || previous.connectedAt } : previous);
       });
@@ -810,6 +1134,7 @@ function App() {
             : '';
         finishCallLocally(status === 'missed' ? 'Missed' : 'Ended', message);
       });
+      socket.connect();
     }
 
     connectSocket().catch((error) => {
@@ -817,6 +1142,8 @@ function App() {
     });
     return () => {
       active = false;
+      liveRoomRef.current?.disconnect();
+      liveRoomRef.current = null;
       if (socketRef.current === socket) socketRef.current = null;
       socket?.disconnect();
     };
@@ -828,6 +1155,15 @@ function App() {
 
   useEffect(() => {
     if (screen === 'chat') {
+      if (selected.id) {
+        setUnreadByUser((previous) => {
+          if (!previous[selected.id]) return previous;
+          const next = { ...previous };
+          delete next[selected.id];
+          return next;
+        });
+        refreshConversations();
+      }
       let active = true;
       setMessageLoading(true);
       setChatError('');
@@ -842,6 +1178,7 @@ function App() {
             });
             setHasOlderMessages(history.length === 100);
             setTyping(false);
+            refreshConversations();
           }
         })
         .catch((error) => {
@@ -863,6 +1200,9 @@ function App() {
       request('calls').then(setCallHistory).catch((error) => {
         setCallHistoryError(error.message || 'Could not load call history.');
       });
+      setConversations((previous) => previous.map((conversation) =>
+        conversation.user.id === selected.id ? { ...conversation, unreadCount: 0 } : conversation
+      ));
     }
   }, [screen, sessionVersion]);
 
@@ -872,6 +1212,8 @@ function App() {
     peerRef.current?.connection?.close();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     stopAudioRoute();
+    liveRoomRef.current?.disconnect();
+    liveRoomRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -1017,6 +1359,8 @@ function App() {
 
   // LOGOUT HANDLER (Requirement 9)
   const handleLogout = async () => {
+    leaveRoom();
+    socketRef.current?.disconnect();
     await clearSession();
     setSessionVersion((value) => value + 1);
     setUserId(null);
@@ -1027,10 +1371,15 @@ function App() {
     setLevel('Beginner');
     setPartners([]);
     setMessages([]);
+    setUnreadByUser({});
     setScreen('welcome');
   };
 
   async function saveProfile(next) {
+    if (!name.trim() || !nativeLanguage || !learningLanguage || !country) {
+      Alert.alert('Complete your profile', 'Choose your native language, learning language, and country before continuing.');
+      return;
+    }
     setBusy(true);
     try {
       await request('onboard', {
@@ -1038,9 +1387,12 @@ function App() {
         body: JSON.stringify({ name, country, nativeLanguage, learningLanguage, level }),
       });
       setBackendUp(true);
-    } catch {
-      Alert.alert('Offline preview', 'Backend not reachable. Screen navigation still works.');
+    } catch (error) {
+      Alert.alert('Profile not saved', error.message || 'Backend not reachable. Please try again.');
+      setBusy(false);
+      return;
     }
+
     setBusy(false);
     setScreen(next);
   }
@@ -1055,33 +1407,38 @@ function App() {
         body: JSON.stringify({ to: selected.id, text }),
       });
       setMessages((prev) => (prev.some((x) => x.id === result.id) ? prev : [...prev, result]));
+      setConversations((previous) => {
+        const partner = partnersRef.current.find((item) => item.id === result.to) || selected;
+        const entry = { user: partner, latestMessage: result, unreadCount: 0 };
+        return [entry, ...previous.filter((item) => item.user.id !== result.to)];
+      });
       setChatError('');
       socketRef.current?.emit('typing:stop', { to: selected.id });
     } catch (error) {
       setChatError(error.message || 'Message could not be sent. Check your connection and try again.');
       setDraft(text);
     }
+  }
 
-    async function loadEarlierMessages() {
-      const conversation = messages
-        .filter((message) => (message.from === selected.id && message.to === userId) || (message.from === userId && message.to === selected.id))
-        .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
-      const oldest = conversation[0];
-      if (!oldest || loadingOlderMessages) return;
-      setLoadingOlderMessages(true);
-      try {
-        const history = await request(`messages/${userId}/${selected.id}?limit=100&before=${encodeURIComponent(oldest.at)}`);
-        setMessages((previous) => {
-          const merged = new Map(previous.map((message) => [message.id, message]));
-          history.forEach((message) => merged.set(message.id, message));
-          return [...merged.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
-        });
-        setHasOlderMessages(history.length === 100);
-      } catch (error) {
-        setChatError(error.message || 'Could not load earlier messages.');
-      } finally {
-        setLoadingOlderMessages(false);
-      }
+  async function loadEarlierMessages() {
+    const conversation = messages
+      .filter((message) => (message.from === selected.id && message.to === userId) || (message.from === userId && message.to === selected.id))
+      .sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+    const oldest = conversation[0];
+    if (!oldest || loadingOlderMessages) return;
+    setLoadingOlderMessages(true);
+    try {
+      const history = await request(`messages/${userId}/${selected.id}?limit=100&before=${encodeURIComponent(oldest.at)}`);
+      setMessages((previous) => {
+        const merged = new Map(previous.map((message) => [message.id, message]));
+        history.forEach((message) => merged.set(message.id, message));
+        return [...merged.values()].sort((left, right) => Date.parse(left.at) - Date.parse(right.at));
+      });
+      setHasOlderMessages(history.length === 100);
+    } catch (error) {
+      setChatError(error.message || 'Could not load earlier messages.');
+    } finally {
+      setLoadingOlderMessages(false);
     }
   }
 
@@ -1101,13 +1458,66 @@ function App() {
   }
 
   async function join(room) {
-    try {
-      await request(`rooms/${room.id}/join`, { method: 'POST' });
-      Alert.alert('Joined demo room', `You're in ${room.name}. Live microphone streaming is not yet included.`);
-      refresh();
-    } catch {
-      Alert.alert('Cannot join', 'Start and connect backend first.');
+    if (activeRoomRef.current) {
+      Alert.alert('Already in a room', 'Leave your current room before joining another one.');
+      return;
     }
+    if (!room.mediaAvailable) {
+      setRoomError('Live audio is unavailable because the media server is not configured.');
+      return;
+    }
+    if (!socketRef.current?.connected) {
+      setRoomError('Real-time service is disconnected. Reconnect before joining a room.');
+      return;
+    }
+    setRoomError('');
+    setRoomStatus('connecting');
+    try {
+      const session = await request(`rooms/${room.id}/session`);
+      const liveRoom = await connectLiveRoom({
+        url: session.url,
+        token: session.token,
+        onEvent: (event) => {
+          if (event.type === 'connection') console.log('[BYTALK room] media connection', { roomId: room.id, state: event.state });
+          if (event.type === 'track-subscribed') console.log('[BYTALK room] remote audio subscribed', { roomId: room.id, participantId: event.participantId });
+          if (event.type === 'disconnected' && activeRoomRef.current?.id === room.id) {
+            setRoomStatus('error');
+            setRoomError('The live audio connection ended.');
+          }
+        },
+      });
+      const response = await emitWithAck('room:join', { roomId: room.id });
+      liveRoomRef.current = liveRoom;
+      setActiveRoom(room);
+      setRoomParticipants(response.participants || []);
+      setRoomMuted(false);
+      setRoomStatus('connected');
+    } catch (error) {
+      liveRoomRef.current?.disconnect();
+      liveRoomRef.current = null;
+      setRoomStatus('error');
+      setRoomError(error.message || 'Could not join this live audio room.');
+      Alert.alert('Could not join room', error.message || 'Microphone permission or live audio connection failed.');
+    }
+  }
+
+  function leaveRoom() {
+    const roomId = activeRoomRef.current?.id;
+    if (roomId) socketRef.current?.emit('room:leave', { roomId });
+    liveRoomRef.current?.disconnect();
+    liveRoomRef.current = null;
+    activeRoomRef.current = null;
+    setActiveRoom(null);
+    setRoomParticipants([]);
+    setRoomMuted(false);
+    setRoomStatus('idle');
+  }
+
+  async function toggleRoomMute() {
+    if (!liveRoomRef.current) return;
+    const next = !roomMuted;
+    await liveRoomRef.current.setMuted(next);
+    setRoomMuted(next);
   }
 
   async function addWord() {
@@ -1211,6 +1621,14 @@ function App() {
                 </TouchableOpacity>
               </View>
             </View>
+          )}
+          {messageBanner && (
+            <TouchableOpacity
+              onPress={() => openConversation(messageBanner.sender)}
+              style={{ marginHorizontal: 14, marginTop: 8, padding: 12, borderRadius: 12, backgroundColor: '#FFF0E8', borderWidth: 1, borderColor: '#FFD4C2' }}
+            >
+              <Txt size={12} color={navy} bold>{messageBanner.sender.displayName || messageBanner.sender.name}: <Txt size={12} color={navy} bold={false}>{messageBanner.text}</Txt></Txt>
+            </TouchableOpacity>
           )}
 
           {/* SCREEN 1: WELCOME SCREEN */}
@@ -1719,9 +2137,27 @@ function App() {
                 </Txt>
               </View>
               <Field label="Your name" value={name} setValue={setName} placeholder="e.g. Alex Smith" />
-              <Field label="My native language" value={nativeLanguage} setValue={setNativeLanguage} placeholder="e.g. English" />
-              <Field label="I want to learn" value={learningLanguage} setValue={setLearningLanguage} placeholder="e.g. Spanish" />
-              <Field label="I am from" value={country} setValue={setCountry} placeholder="e.g. United States" />
+              <SearchSelect
+                label="My native language"
+                value={nativeLanguage}
+                options={LANGUAGES}
+                onSelect={setNativeLanguage}
+                placeholder="Choose a language"
+              />
+              <SearchSelect
+                label="I want to learn"
+                value={learningLanguage}
+                options={LANGUAGES}
+                onSelect={setLearningLanguage}
+                placeholder="Choose a language"
+              />
+              <SearchSelect
+                label="I am from"
+                value={country}
+                options={COUNTRY_OPTIONS}
+                onSelect={setCountry}
+                placeholder="Choose a country"
+              />
               <Btn label="Next  →" onPress={() => setScreen('level')} style={{ marginTop: 15 }} />
             </ScrollView>
           )}
@@ -1864,9 +2300,7 @@ function App() {
                           accessibilityRole="button"
                           accessibilityLabel={`Chat with ${p.name}`}
                           onPress={() => {
-                            setSelected(p);
-                            setChatError('');
-                            setScreen('chat');
+                            openConversation(p);
                           }}
                           style={[styles.chatButtonOutline, styles.partnerAction]}
                         >
@@ -1912,11 +2346,52 @@ function App() {
             </>
           )}
 
+          {screen === 'messages' && (
+            <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
+              <Header title="Messages" subtitle="Your latest conversations" />
+              {!conversations.length ? (
+                <View style={{ padding: 24, alignItems: 'center' }}>
+                  <Txt color={muted}>No conversations yet. Start a chat from Discover.</Txt>
+                </View>
+              ) : conversations.map((conversation) => {
+                const partner = conversation.user;
+                const latest = conversation.latestMessage;
+                return (
+                  <TouchableOpacity
+                    key={partner.id}
+                    onPress={() => openConversation(partner)}
+                    style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#EEF0F4' }}
+                  >
+                    <View style={[styles.avatarCircle, { backgroundColor: '#FFE0D3' }]}>
+                      {partner.avatarUrl ? (
+                        <Image source={{ uri: partner.avatarUrl }} style={styles.partnerAvatarImage} />
+                      ) : (
+                        <Txt size={19} bold color={orange}>{(partner.displayName || partner.name || '?').charAt(0).toUpperCase()}</Txt>
+                      )}
+                    </View>
+                    <View style={{ flex: 1, marginLeft: 12 }}>
+                      <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <Txt bold size={15}>{partner.displayName || partner.name}</Txt>
+                        <Txt size={10} color={muted}>{latest?.at ? new Date(latest.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''}</Txt>
+                      </View>
+                      <Txt size={12} color={muted} numberOfLines={1} style={{ marginTop: 4 }}>{latest?.text || ''}</Txt>
+                    </View>
+                    {conversation.unreadCount > 0 && (
+                      <View style={{ minWidth: 20, height: 20, borderRadius: 10, backgroundColor: COLORS.error, alignItems: 'center', justifyContent: 'center', marginLeft: 8 }}>
+                        <Txt color="#fff" size={10} bold>{conversation.unreadCount}</Txt>
+                      </View>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          )}
+
           {/* SCREEN 7: CHAT */}
           {screen === 'chat' && (
             <>
               <TouchableOpacity
-                onPress={() => setScreen('discover')}
+                onPress={() => setScreen('messages')}
                 style={styles.chatHeader}
               >
                 <Ionicons name="arrow-back" size={22} color={navy} />
@@ -2036,6 +2511,7 @@ function App() {
                 </View>
               ) : (
                 <View style={styles.voiceCallAvatarArea}>
+                  <CallAudio stream={remoteStream} />
                   <View style={styles.callAvatar}>
                     <Txt size={48} bold color="#FFFFFF">{call.peer.name?.charAt(0)?.toUpperCase() || '?'}</Txt>
                   </View>
@@ -2155,6 +2631,23 @@ function App() {
           {screen === 'rooms' && (
             <>
               <Header title="Live speaking rooms" subtitle="Join live audio rooms to practice with people around the world." />
+              {roomError ? (
+                <View style={{ marginHorizontal: 20, marginBottom: 12, padding: 12, borderRadius: 12, backgroundColor: '#FFF0ED' }}>
+                  <Txt color={COLORS.error} size={12}>{roomError}</Txt>
+                </View>
+              ) : null}
+              {activeRoom && (
+                <View style={{ marginHorizontal: 20, marginBottom: 16, padding: 16, borderRadius: 16, backgroundColor: '#FFF0E8', borderWidth: 1, borderColor: '#FFD8C9' }}>
+                  <Txt bold size={16}>Live in {activeRoom.name}</Txt>
+                  <Txt color={muted} size={12} style={{ marginTop: 4 }}>
+                    {roomParticipants.length} connected participant{roomParticipants.length === 1 ? '' : 's'}
+                  </Txt>
+                  <View style={{ flexDirection: 'row', gap: 8, marginTop: 12 }}>
+                    <Btn label={roomMuted ? 'Unmute microphone' : 'Mute microphone'} outline onPress={toggleRoomMute} style={{ flex: 1 }} />
+                    <Btn label="Leave room" onPress={leaveRoom} style={{ flex: 1, backgroundColor: COLORS.error }} />
+                  </View>
+                </View>
+              )}
               <ScrollView contentContainerStyle={{ paddingHorizontal: 20 }}>
                 <View style={{ flexDirection: 'row', gap: 8, marginBottom: 18 }}>
                   {['All', 'English', 'Travel', 'Culture', 'Study'].map((f) => (
@@ -2184,12 +2677,19 @@ function App() {
                           <Txt bold size={15}>{room.name}</Txt>
                           <Txt size={12} color={muted} style={{ marginTop: 2 }}>{room.level}</Txt>
                         </View>
-                        <Txt size={11} color="#16ac64" bold>● Live</Txt>
+                        <Txt size={11} color={room.mediaAvailable ? '#16ac64' : muted} bold>
+                          {room.mediaAvailable ? '● Live' : 'Unavailable'}
+                        </Txt>
                       </View>
                       <Txt size={12} color={muted} style={{ marginVertical: 14 }}>
-                        👥 {room.listeners + (room.joined || 0)} listening
+                        👥 {room.participants || 0} connected
                       </Txt>
-                      <Btn label="Join room" onPress={() => join(room)} />
+                      <Btn
+                        label={roomStatus === 'connecting' ? 'Connecting...' : activeRoom?.id === room.id ? 'Joined' : 'Join room'}
+                        onPress={() => join(room)}
+                        disabled={!room.mediaAvailable || Boolean(activeRoom)}
+                        loading={roomStatus === 'connecting' && activeRoom?.id !== room.id}
+                      />
                     </View>
                   ))}
               </ScrollView>
@@ -2291,9 +2791,17 @@ function App() {
           {!['welcome', 'login', 'register', 'onboard', 'level', 'call'].includes(screen) && (
             <View style={styles.tabBar}>
               {tabItems.map(([id, icon, label]) => (
-                <TouchableOpacity key={id} onPress={() => setScreen(id)} style={styles.tabItem}>
-                  <Ionicons name={icon} size={22} color={screen === id ? orange : '#98a3b3'} />
-                  <Txt size={10} color={screen === id ? orange : muted} bold={screen === id}>{label}</Txt>
+                <TouchableOpacity key={id} onPress={() => {
+                  if (id === 'chat') requestNotificationPermission();
+                  setScreen(id === 'chat' ? 'messages' : id);
+                }} style={styles.tabItem}>
+                  <Ionicons name={icon} size={22} color={screen === id || (id === 'chat' && screen === 'messages') ? orange : '#98a3b3'} />
+                  <Txt size={10} color={screen === id || (id === 'chat' && screen === 'messages') ? orange : muted} bold={screen === id || (id === 'chat' && screen === 'messages')}>{label}</Txt>
+                  {id === 'chat' && Object.values(unreadByUser).reduce((sum, count) => sum + count, 0) > 0 && (
+                    <View style={{ position: 'absolute', top: -3, right: 12, minWidth: 16, height: 16, paddingHorizontal: 4, borderRadius: 8, backgroundColor: COLORS.error, alignItems: 'center', justifyContent: 'center' }}>
+                      <Txt color="#fff" size={9} bold>{Object.values(unreadByUser).reduce((sum, count) => sum + count, 0)}</Txt>
+                    </View>
+                  )}
                 </TouchableOpacity>
               ))}
             </View>
