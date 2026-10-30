@@ -9,10 +9,13 @@ import crypto from 'crypto';
 import mongoose from 'mongoose';
 import { User, publicUser } from './models/User.js';
 import { Message, publicMessage } from './models/Message.js';
+import { CallHistory } from './models/CallHistory.js';
+import { PracticeSession } from './models/PracticeSession.js';
 import { messageCutoff } from './messageRetention.js';
 import { SubscriptionEvent } from './models/SubscriptionEvent.js';
 import { SUBSCRIPTION_PLANS, activeSubscription, canUseVideo, entitlementPayload, resetUsageIfNeeded } from './subscriptions.js';
 import { AccessToken } from 'livekit-server-sdk';
+import { generateAiResponse } from './aiService.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const dbFile = process.env.BYTALK_DATA_FILE
@@ -57,6 +60,16 @@ const PRACTICE_TOPIC_ALIASES = {
   'Daily Life': ['Daily Life', 'Everyday life'],
 };
 const PRACTICE_TOPICS = ['All Topics', ...Object.keys(PRACTICE_TOPIC_ALIASES)];
+const LANGUAGES = [
+  'English', 'Hindi', 'Marathi', 'Spanish', 'French', 'Japanese', 'Mandarin Chinese',
+  'Arabic', 'German', 'Portuguese', 'Bengali', 'Russian', 'Urdu', 'Indonesian',
+  'Korean', 'Italian', 'Turkish', 'Tamil', 'Telugu', 'Vietnamese', 'Polish', 'Dutch',
+  'Greek', 'Hebrew', 'Thai', 'Swedish', 'Czech', 'Hungarian', 'Romanian', 'Danish',
+  'Finnish', 'Norwegian', 'Swahili', 'Malay', 'Ukrainian',
+];
+const AI_SESSIONS = new Map();
+const AI_REQUESTS = new Map();
+// Real AI service integration powered by ./aiService.js
 
 function practiceInterestQuery(topic) {
   if (topic === 'All Topics') return {};
@@ -77,6 +90,50 @@ function normalizePracticeInterests(value) {
   const cleaned = value.map((interest) => typeof interest === 'string' ? interest.trim() : '');
   if (cleaned.some((interest) => !allowed.has(interest))) return null;
   return [...new Set(cleaned)];
+}
+
+function normalizeLevel(value) {
+  const levels = ['Beginner', 'Elementary', 'Intermediate', 'Upper Intermediate', 'Advanced', 'Fluent', 'Proficient'];
+  return typeof value === 'string' && levels.includes(value) ? value : null;
+}
+
+function normalizeSettings(body = {}) {
+  const result = {};
+  if (body.learningLanguage !== undefined && typeof body.learningLanguage === 'string' && LANGUAGES.includes(body.learningLanguage)) {
+    result.learningLanguage = body.learningLanguage;
+  }
+  if (body.level !== undefined) {
+    const level = normalizeLevel(body.level);
+    if (!level) return null;
+    result.level = level;
+  }
+  if (body.uiLanguage !== undefined && body.uiLanguage !== 'English') return null;
+  if (body.uiLanguage !== undefined) result.uiLanguage = body.uiLanguage;
+  if (body.silenceMode !== undefined) result.silenceMode = Boolean(body.silenceMode);
+  if (body.appearance !== undefined && ['light', 'dark', 'system'].includes(body.appearance)) result.appearance = body.appearance;
+  if (body.textScale !== undefined && Number.isFinite(Number(body.textScale))) {
+    const textScale = Number(body.textScale);
+    if (textScale < 0.9 || textScale > 1.25) return null;
+    result.textScale = textScale;
+  }
+  if (body.notificationPreferences !== undefined) {
+    if (!body.notificationPreferences || typeof body.notificationPreferences !== 'object') return null;
+    result.notificationPreferences = {};
+    for (const key of ['push', 'messages', 'incomingCalls', 'missedCalls', 'practiceReminders', 'subscriptions']) {
+      if (body.notificationPreferences[key] !== undefined) result.notificationPreferences[key] = Boolean(body.notificationPreferences[key]);
+    }
+  }
+  if (body.audioPreferences !== undefined) {
+    if (!body.audioPreferences || typeof body.audioPreferences !== 'object') return null;
+    result.audioPreferences = {};
+    if (body.audioPreferences.manager !== undefined && ['system', 'speaker', 'earpiece'].includes(body.audioPreferences.manager)) {
+      result.audioPreferences.manager = body.audioPreferences.manager;
+    }
+    for (const key of ['echoCanceller', 'noiseSuppressor']) {
+      if (body.audioPreferences[key] !== undefined) result.audioPreferences[key] = Boolean(body.audioPreferences[key]);
+    }
+  }
+  return result;
 }
 async function ensureMessageRetention() {
   await Message.collection.updateMany(
@@ -352,6 +409,8 @@ try {
   }
   store.users = (await User.find().lean()).map(cacheUser);
   await ensureMessageRetention();
+  await CallHistory.createIndexes();
+  await PracticeSession.createIndexes();
   if (await Message.countDocuments() === 0 && store.messages.length) {
     await Message.insertMany(store.messages.map((message) => ({
       id: message.id,
@@ -436,6 +495,10 @@ app.use((req, res, next) => {
     const token = authHeader.slice(7).trim();
     try {
       const decoded = verifyToken(token);
+      const cached = store?.users?.find((user) => user.id === decoded.userId);
+      if (cached && Number(decoded.tokenVersion || 0) !== Number(cached.tokenVersion || 0)) {
+        throw new Error('Session invalidated');
+      }
       req.user = decoded;
     } catch (err) {
       // Invalid or expired token
@@ -476,6 +539,35 @@ function saveCall(call) {
   save();
 }
 
+function normalizedCallHistoryStatus(status) {
+  if (status === 'ended') return 'completed';
+  if (status === 'cancelled') return 'rejected';
+  if (status === 'restricted') return 'rejected';
+  return ['completed', 'missed', 'rejected', 'failed'].includes(status) ? status : 'failed';
+}
+
+async function persistCallHistory(call) {
+  const endedAt = new Date(call.endedAt);
+  const connectedAt = call.connectedAt ? new Date(call.connectedAt) : null;
+  await CallHistory.findOneAndUpdate(
+    { callId: call.id },
+    {
+      $set: {
+        callerId: String(call.callerId),
+        calleeId: String(call.calleeId),
+        type: call.type,
+        status: normalizedCallHistoryStatus(call.status),
+        connectedAt,
+        endedAt,
+        durationSeconds: Number(call.durationSeconds) || 0,
+        createdAt: new Date(call.createdAt),
+      },
+      $setOnInsert: { callId: call.id },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+}
+
 function finishCall(call, status, endedBy) {
   const timer = callTimers.get(call.id);
   if (timer) clearTimeout(timer);
@@ -495,6 +587,10 @@ function finishCall(call, status, endedBy) {
   activeCalls.delete(call.id);
   userCalls.delete(call.callerId);
   userCalls.delete(call.calleeId);
+  return persistCallHistory(call).catch((error) => {
+    console.error(`Call history persistence failed for ${call.id}: ${error.message}`);
+    throw error;
+  });
 }
 
 function armCallTimeout(call, status, durationMs, onTimeout) {
@@ -555,7 +651,7 @@ app.post('/api/register', async (req, res) => {
     store.users.push(cachedUser);
 
     // Issue 15-day JWT token
-    const token = signToken({ userId: cachedUser.id, email: newUser.email }, { expiresIn: '15d' });
+    const token = signToken({ userId: cachedUser.id, email: newUser.email, tokenVersion: newUser.tokenVersion || 0 }, { expiresIn: '15d' });
     return res.status(201).json({ ok: true, user: { ...publicUser(newUser), email: newUser.email }, token });
   } catch (error) {
     if (error?.code === 11000) {
@@ -588,7 +684,7 @@ app.post('/api/login', async (req, res) => {
     store.users = store.users.map((item) => item.id === user.id ? user : item);
 
     // Issue 15-day JWT token
-    const token = signToken({ userId: user.id, email: user.email }, { expiresIn: '15d' });
+    const token = signToken({ userId: user.id, email: user.email, tokenVersion: user.tokenVersion || 0 }, { expiresIn: '15d' });
     return res.json({ ok: true, user: { ...publicUser(userDocument), email: user.email }, token });
   } catch (error) {
     console.error(`Login database error: ${error.message}`);
@@ -612,6 +708,411 @@ app.get('/api/auth/me', async (req, res) => {
     return res.json({ ok: true, user: { ...publicUser(user), email: user.email } });
   } catch (err) {
     return res.status(401).json({ error: err.message || 'Invalid or expired session token' });
+  }
+});
+
+app.get('/api/settings', requireAuth, async (req, res) => {
+  const user = await User.findById(req.authenticatedUser.id).lean();
+  if (!user) return res.status(404).json({ error: 'Profile not found.' });
+  res.json({
+    learningLanguage: user.learningLanguage,
+    level: user.level,
+    uiLanguage: user.uiLanguage || 'English',
+    notificationPreferences: user.notificationPreferences || {},
+    silenceMode: Boolean(user.silenceMode),
+    appearance: user.appearance || 'system',
+    textScale: user.textScale || 1,
+    audioPreferences: user.audioPreferences || {},
+    blockedUsers: (user.blockedUsers || []).map((id) => {
+      const blocked = store.users.find((candidate) => candidate.id === id);
+      return blocked ? { id, name: blocked.name, profilePhotoUrl: blocked.profilePhotoUrl || null } : null;
+    }).filter(Boolean),
+    subscription: entitlementPayload(user),
+    provider: user.subscriptionProvider || null,
+  });
+});
+
+app.patch('/api/settings', requireAuth, async (req, res) => {
+  const update = normalizeSettings(req.body);
+  if (!update) return res.status(400).json({ error: 'One or more settings values are invalid.' });
+  const user = await User.findByIdAndUpdate(req.authenticatedUser.id, { $set: update }, { new: true, runValidators: true });
+  if (!user) return res.status(404).json({ error: 'Profile not found.' });
+  store.users = (await User.find().lean()).map(cacheUser);
+  res.json({ ok: true, settings: { ...update, learningLanguage: user.learningLanguage, level: user.level } });
+});
+
+app.post('/api/users/:userId/block', requireAuth, async (req, res) => {
+  const targetId = String(req.params.userId);
+  if (targetId === String(req.authenticatedUser.id) || !(await User.exists({ _id: targetId }))) {
+    return res.status(400).json({ error: 'Invalid user to block.' });
+  }
+  await User.findByIdAndUpdate(req.authenticatedUser.id, { $addToSet: { blockedUsers: targetId } });
+  res.json({ ok: true });
+});
+
+app.delete('/api/users/:userId/block', requireAuth, async (req, res) => {
+  await User.findByIdAndUpdate(req.authenticatedUser.id, { $pull: { blockedUsers: String(req.params.userId) } });
+  res.json({ ok: true });
+});
+
+app.get('/api/account/export', requireAuth, async (req, res) => {
+  const user = await User.findById(req.authenticatedUser.id).select('-passwordHash').lean();
+  if (!user) return res.status(404).json({ error: 'Account not found.' });
+  const [userMessages, userCalls, practiceSessions] = await Promise.all([
+    Message.find({ $or: [{ from: String(user._id) }, { to: String(user._id) }] }).select('-_id -__v').lean(),
+    CallHistory.find({ $or: [{ callerId: String(user._id) }, { calleeId: String(user._id) }] }).select('-_id -__v').lean(),
+    PracticeSession.find({ userId: String(user._id) }).select('-_id -__v').lean(),
+  ]);
+  res.json({ exportedAt: new Date().toISOString(), profile: publicUser(user), messages: userMessages, calls: userCalls, practiceSessions });
+});
+
+app.post('/api/account/logout-all', requireAuth, async (req, res) => {
+  const updated = await User.findByIdAndUpdate(req.authenticatedUser.id, { $inc: { tokenVersion: 1 } }, { new: true }).lean();
+  store.users = store.users.map((user) => user.id === String(req.authenticatedUser.id) ? cacheUser(updated) : user);
+  res.json({ ok: true });
+});
+
+app.delete('/api/account', requireAuth, async (req, res) => {
+  const confirmation = String(req.body?.confirmation || '');
+  if (confirmation !== 'DELETE') return res.status(400).json({ error: 'Type DELETE to confirm account deletion.' });
+  const userId = String(req.authenticatedUser.id);
+  const user = await User.findById(userId).select('+passwordHash');
+  if (!user || typeof req.body?.password !== 'string' || !verifyPassword(req.body.password, user.passwordHash)) {
+    return res.status(401).json({ error: 'Re-authentication failed.' });
+  }
+  await Promise.all([
+    User.deleteOne({ _id: userId }),
+    Message.deleteMany({ $or: [{ from: userId }, { to: userId }] }),
+    CallHistory.deleteMany({ $or: [{ callerId: userId }, { calleeId: userId }] }),
+    PracticeSession.deleteMany({ userId }),
+  ]);
+  store.users = store.users.filter((user) => user.id !== userId);
+  res.json({ ok: true });
+});
+
+function enforceAiRateLimit(userId) {
+  const now = Date.now();
+  const recent = (AI_REQUESTS.get(userId) || []).filter((timestamp) => now - timestamp < 60_000);
+  if (recent.length >= 20) return false;
+  recent.push(now);
+  AI_REQUESTS.set(userId, recent);
+  return true;
+}
+
+// AI Practice & Conversation Endpoints (BYTALK AI Partner)
+
+// Periodic cleanup of idle AI sessions (> 3 hours)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of AI_SESSIONS.entries()) {
+    if (now - (session.lastActiveAt || session.startedAt) > 3 * 60 * 60 * 1000) {
+      AI_SESSIONS.delete(id);
+    }
+  }
+}, 30 * 60 * 1000);
+
+/**
+ * POST /api/ai/chat
+ * Primary authenticated AI conversation endpoint supporting:
+ * - message, topic, language, proficiencyLevel, conversationId, conversationHistory
+ */
+app.post('/api/ai/chat', requireAuth, async (req, res) => {
+  const userId = String(req.authenticatedUser.id);
+  if (!enforceAiRateLimit(userId)) {
+    return res.status(429).json({ error: 'AI practice rate limit reached. Please wait a moment before sending more messages.' });
+  }
+
+  const {
+    message,
+    topic = 'All Topics',
+    language = req.authenticatedUser.learningLanguage || 'English',
+    proficiencyLevel = req.authenticatedUser.level || 'Beginner',
+    conversationId,
+    conversationHistory
+  } = req.body || {};
+
+  const cleanTopic = String(topic || 'All Topics').trim();
+  const cleanLanguage = String(language || 'English').trim();
+  const cleanLevel = String(proficiencyLevel || 'Beginner').trim();
+  const cleanMessage = typeof message === 'string' ? message.trim() : '';
+
+  if (cleanMessage && cleanMessage.length > 1500) {
+    return res.status(400).json({ error: 'Message cannot exceed 1500 characters.' });
+  }
+
+  let sessionId = conversationId;
+  let session = sessionId ? AI_SESSIONS.get(sessionId) : null;
+
+  if (session && session.userId !== userId) {
+    return res.status(403).json({ error: 'Unauthorized to access this AI conversation.' });
+  }
+
+  if (!session) {
+    sessionId = crypto.randomUUID();
+    session = {
+      id: sessionId,
+      userId,
+      topic: cleanTopic,
+      language: cleanLanguage,
+      level: cleanLevel,
+      startedAt: Date.now(),
+      lastActiveAt: Date.now(),
+      messages: Array.isArray(conversationHistory) ? [...conversationHistory] : []
+    };
+    AI_SESSIONS.set(sessionId, session);
+  }
+
+  if (cleanTopic) session.topic = cleanTopic;
+  if (cleanLanguage) session.language = cleanLanguage;
+  if (cleanLevel) session.level = cleanLevel;
+  session.lastActiveAt = Date.now();
+
+  try {
+    if (cleanMessage) {
+      session.messages.push({
+        role: 'user',
+        content: cleanMessage,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const aiReply = await generateAiResponse({
+      topic: session.topic,
+      language: session.language,
+      proficiencyLevel: session.level,
+      messages: session.messages
+    });
+
+    const aiMessage = {
+      role: 'assistant',
+      content: aiReply,
+      timestamp: new Date().toISOString()
+    };
+    session.messages.push(aiMessage);
+
+    res.json({
+      success: true,
+      response: aiReply,
+      message: aiMessage,
+      conversationId: sessionId,
+      sessionId,
+      topic: session.topic,
+      language: session.language,
+      proficiencyLevel: session.level
+    });
+  } catch (error) {
+    if (cleanMessage && session.messages[session.messages.length - 1]?.role === 'user') {
+      session.messages.pop();
+    }
+    const status = error.status || (error.code === 'ai_provider_unavailable' ? 503 : 502);
+    res.status(status).json({
+      success: false,
+      error: error.message || 'The AI conversation service could not respond.',
+      code: error.code || 'ai_provider_error'
+    });
+  }
+});
+
+/**
+ * POST /api/practice/ai/start
+ * Initializes a new conversation with BYTALK AI Partner and returns greeting.
+ */
+app.post('/api/practice/ai/start', requireAuth, async (req, res) => {
+  const userId = String(req.authenticatedUser.id);
+  if (!enforceAiRateLimit(userId)) {
+    return res.status(429).json({ error: 'AI practice rate limit reached. Try again shortly.' });
+  }
+
+  const topic = String(req.body?.topic || 'All Topics').trim();
+  const language = String(req.body?.language || req.authenticatedUser.learningLanguage || 'English').trim();
+  const level = String(req.body?.level || req.authenticatedUser.level || 'Beginner').trim();
+
+  try {
+    const sessionId = crypto.randomUUID();
+    const session = {
+      id: sessionId,
+      userId,
+      topic,
+      language,
+      level,
+      startedAt: Date.now(),
+      lastActiveAt: Date.now(),
+      messages: []
+    };
+
+    const greeting = await generateAiResponse({
+      topic,
+      language,
+      proficiencyLevel: level,
+      messages: []
+    });
+
+    const aiMessage = {
+      role: 'assistant',
+      content: greeting,
+      timestamp: new Date().toISOString()
+    };
+    session.messages.push(aiMessage);
+    AI_SESSIONS.set(sessionId, session);
+
+    res.status(201).json({
+      success: true,
+      sessionId,
+      conversationId: sessionId,
+      topic,
+      language,
+      level,
+      partnerName: 'BYTALK AI Partner',
+      message: aiMessage,
+      response: greeting
+    });
+  } catch (error) {
+    const status = error.status || (error.code === 'ai_provider_unavailable' ? 503 : 502);
+    res.status(status).json({
+      success: false,
+      error: error.message || 'Could not start AI practice session.',
+      code: error.code || 'ai_provider_error'
+    });
+  }
+});
+
+/**
+ * POST /api/practice/ai/:sessionId/messages
+ * Sends a message to the active session and returns the AI response.
+ */
+app.post('/api/practice/ai/:sessionId/messages', requireAuth, async (req, res) => {
+  const userId = String(req.authenticatedUser.id);
+  const session = AI_SESSIONS.get(req.params.sessionId);
+  const text = typeof req.body?.text === 'string'
+    ? req.body.text.trim()
+    : typeof req.body?.message === 'string'
+      ? req.body.message.trim()
+      : '';
+
+  if (!session || session.userId !== userId) {
+    return res.status(404).json({ error: 'Practice session not found.' });
+  }
+  if (!text || text.length > 1500) {
+    return res.status(400).json({ error: 'Enter a message up to 1500 characters.' });
+  }
+  if (!enforceAiRateLimit(userId)) {
+    return res.status(429).json({ error: 'AI practice rate limit reached. Try again shortly.' });
+  }
+
+  try {
+    const userMessage = {
+      role: 'user',
+      content: text,
+      timestamp: new Date().toISOString()
+    };
+    session.messages.push(userMessage);
+    session.lastActiveAt = Date.now();
+
+    const reply = await generateAiResponse({
+      topic: session.topic,
+      language: session.language,
+      proficiencyLevel: session.level,
+      messages: session.messages
+    });
+
+    const aiMessage = {
+      role: 'assistant',
+      content: reply,
+      timestamp: new Date().toISOString()
+    };
+    session.messages.push(aiMessage);
+
+    res.json({
+      success: true,
+      message: aiMessage,
+      response: reply
+    });
+  } catch (error) {
+    session.messages.pop();
+    const status = error.status || (error.code === 'ai_provider_unavailable' ? 503 : 502);
+    res.status(status).json({
+      success: false,
+      error: error.message || 'The AI conversation partner could not respond.',
+      code: error.code || 'ai_provider_error'
+    });
+  }
+});
+
+/**
+ * POST /api/practice/ai/:sessionId/end
+ * Concludes the AI practice session and saves record to PracticeSession collection.
+ */
+app.post('/api/practice/ai/:sessionId/end', requireAuth, async (req, res) => {
+  const userId = String(req.authenticatedUser.id);
+  const session = AI_SESSIONS.get(req.params.sessionId);
+  if (!session || session.userId !== userId) {
+    return res.status(404).json({ error: 'Practice session not found.' });
+  }
+
+  AI_SESSIONS.delete(req.params.sessionId);
+  const endedAt = Date.now();
+  const durationSeconds = Math.max(0, Math.floor((endedAt - session.startedAt) / 1000));
+  const messageCount = session.messages.length;
+
+  try {
+    const saved = await PracticeSession.create({
+      userId: session.userId,
+      mode: 'ai',
+      topic: session.topic,
+      language: session.language || 'English',
+      level: session.level || 'Beginner',
+      startedAt: new Date(session.startedAt),
+      endedAt: new Date(endedAt),
+      durationSeconds,
+      messageCount,
+      rating: Number(req.body?.rating) || undefined,
+      feedback: typeof req.body?.feedback === 'string' ? req.body.feedback.trim() : undefined
+    });
+
+    res.json({
+      ok: true,
+      sessionId: session.id,
+      durationSeconds,
+      messageCount,
+      endedAt: new Date(endedAt).toISOString(),
+      practiceSessionId: saved._id
+    });
+  } catch (error) {
+    console.error(`AI practice session persistence failed: ${error.message}`);
+    res.json({
+      ok: true,
+      sessionId: session.id,
+      durationSeconds,
+      messageCount,
+      endedAt: new Date(endedAt).toISOString()
+    });
+  }
+});
+
+/**
+ * POST /api/practice/ai/:sessionId/feedback
+ * Allows user to submit 1-5 star rating and optional feedback comment.
+ */
+app.post('/api/practice/ai/:sessionId/feedback', requireAuth, async (req, res) => {
+  const userId = String(req.authenticatedUser.id);
+  const { rating, feedback, comment } = req.body || {};
+  const feedbackText = (feedback || comment || '').trim();
+  const ratingNum = Number(rating);
+
+  try {
+    await PracticeSession.findOneAndUpdate(
+      { userId, mode: 'ai' },
+      {
+        $set: {
+          ...(ratingNum ? { rating: ratingNum } : {}),
+          ...(feedbackText ? { feedback: feedbackText } : {})
+        }
+      },
+      { sort: { createdAt: -1 } }
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Could not save feedback.' });
   }
 });
 
@@ -681,13 +1182,15 @@ async function listDiscoverUsers(req, res) {
   const currentUser = await User.findById(currentUserId).lean();
   const q = String(req.query.q || '').toLowerCase();
   const topic = String(req.query.topic || 'All Topics');
+  const practiceOnly = req.query.practiceOnly === 'true';
   if (!PRACTICE_TOPICS.includes(topic)) {
     return res.status(400).json({ error: 'Invalid practice topic.' });
   }
-  const eligibleQuery = { _id: { $ne: currentUserId } };
+  const blockedUsers = currentUser?.blockedUsers || [];
+  const eligibleQuery = { _id: { $ne: currentUserId, $nin: blockedUsers } };
   const eligibleCount = await User.countDocuments(eligibleQuery);
   const mongoUsers = await User.find({
-    _id: { $ne: currentUserId },
+    _id: { $ne: currentUserId, $nin: blockedUsers },
     ...practiceInterestQuery(topic),
   }).lean();
   store.users = (await User.find().lean()).map(cacheUser);
@@ -717,8 +1220,7 @@ async function listDiscoverUsers(req, res) {
         ),
       };
     })
-    .filter((user) =>
-      [user.displayName, user.country, ...user.languages, user.level]
+    .filter((user) => (!practiceOnly || user.online) && [user.displayName, user.country, ...user.languages, user.level]
         .some((value) => String(value || '').toLowerCase().includes(q))
     );
   users.sort((left, right) => right._matchScore - left._matchScore || left.name.localeCompare(right.name));
@@ -730,6 +1232,10 @@ async function listDiscoverUsers(req, res) {
 
 app.get('/api/users/discover', requireAuth, listDiscoverUsers);
 app.get('/api/partners', requireAuth, listDiscoverUsers);
+app.get('/api/practice/partners', requireAuth, (req, res) => {
+  req.query.practiceOnly = 'true';
+  return listDiscoverUsers(req, res);
+});
 
 app.patch('/api/profile/practice-interests', requireAuth, async (req, res) => {
   const practiceInterests = normalizePracticeInterests(req.body?.practiceInterests);
@@ -870,6 +1376,10 @@ app.post('/api/messages', requireAuth, async (req, res) => {
   if (typeof to !== 'string' || to === senderId || !store.users.some((user) => user.id === to) || typeof text !== 'string' || !text.trim() || text.length > 1500) {
     return res.status(400).json({ error: 'Invalid message' });
   }
+  const recipient = await User.findById(to).select('blockedUsers').lean();
+  if (recipient?.blockedUsers?.includes(String(senderId)) || req.authenticatedUser.blockedUsers?.includes(to)) {
+    return res.status(403).json({ error: 'Messaging is unavailable for this user.' });
+  }
   const deliveredAt = (userSockets.get(String(to))?.size || 0) > 0 ? new Date() : null;
   const msg = await Message.create({
     id: crypto.randomUUID(),
@@ -932,14 +1442,66 @@ app.get('/api/messages/unread', requireAuth, async (req, res) => {
   res.json(Object.fromEntries(unread.map((entry) => [entry._id, entry.count])));
 });
 
-app.get('/api/calls', requireAuth, (req, res) => {
-  const currentUserId = req.authenticatedUser.id;
-  res.json(
-    store.calls
-      .filter((call) => call.callerId === currentUserId || call.calleeId === currentUserId)
-      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))
-      .slice(0, 100)
+app.get('/api/calls', requireAuth, async (req, res) => {
+  const currentUserId = String(req.authenticatedUser.id);
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const calls = await CallHistory.find({
+    $or: [{ callerId: currentUserId }, { calleeId: currentUserId }],
+    createdAt: { $gte: cutoff },
+  }).sort({ createdAt: -1 }).limit(100).lean();
+  const participantIds = [...new Set(calls.map((call) => (
+    call.callerId === currentUserId ? call.calleeId : call.callerId
+  )))];
+  const participantUsers = await User.find({ _id: { $in: participantIds } }).lean();
+  const usersById = new Map(participantUsers.map((user) => [String(user._id), user]));
+  res.json(calls.map((call) => {
+    const participantId = call.callerId === currentUserId ? call.calleeId : call.callerId;
+    const participant = usersById.get(participantId);
+    return {
+      id: call.callId,
+      callId: call.callId,
+      callerId: call.callerId,
+      calleeId: call.calleeId,
+      type: call.type,
+      status: call.status,
+      createdAt: call.createdAt,
+      connectedAt: call.connectedAt,
+      endedAt: call.endedAt,
+      durationSeconds: call.durationSeconds,
+      participant: participant ? {
+        id: participantId,
+        name: participant.name,
+        profilePhotoUrl: participant.profilePhotoUrl || null,
+      } : { id: participantId, name: 'BYTALK user', profilePhotoUrl: null },
+    };
+  }));
+});
+
+app.post('/api/calls/:callId/feedback', requireAuth, async (req, res) => {
+  const currentUserId = String(req.authenticatedUser.id);
+  const rating = Number(req.body?.rating);
+  const tags = Array.isArray(req.body?.tags)
+    ? [...new Set(req.body.tags.filter((tag) => typeof tag === 'string').map((tag) => tag.trim()).filter(Boolean))].slice(0, 8)
+    : [];
+  const comment = typeof req.body?.comment === 'string' ? req.body.comment.trim() : '';
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return res.status(400).json({ error: 'Rating must be an integer from 1 to 5.' });
+  }
+  if (comment.length > 1000) return res.status(400).json({ error: 'Feedback is too long.' });
+
+  const call = await CallHistory.findOne({
+    callId: req.params.callId,
+    $or: [{ callerId: currentUserId }, { calleeId: currentUserId }],
+    createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+  }).select('_id feedback');
+  if (!call) return res.status(404).json({ error: 'Call history record not found.' });
+
+  const result = await CallHistory.updateOne(
+    { _id: call._id, 'feedback.userId': { $ne: currentUserId } },
+    { $push: { feedback: { userId: currentUserId, rating, tags, comment } } }
   );
+  if (!result.modifiedCount) return res.status(409).json({ error: 'Feedback has already been submitted for this call.' });
+  return res.status(201).json({ ok: true });
 });
 
 app.get('/api/rtc-config', requireAuth, (req, res) => {
@@ -1118,6 +1680,14 @@ io.on('connection', (socket) => {
       acknowledge({ error: 'User not found' });
       return;
     }
+    const [callerBlockState, recipientBlockState] = await Promise.all([
+      User.findById(userId).select('blockedUsers').lean(),
+      User.findById(to).select('blockedUsers').lean(),
+    ]);
+    if (callerBlockState?.blockedUsers?.includes(to) || recipientBlockState?.blockedUsers?.includes(userId)) {
+      acknowledge({ error: 'Calling is unavailable for this user.' });
+      return;
+    }
     if (!(userSockets.get(to)?.size || 0)) {
       console.log(`Call invite rejected: recipient ${to} is offline.`);
       acknowledge({ error: 'This person is offline' });
@@ -1264,17 +1834,30 @@ io.on('connection', (socket) => {
     emitToUser(call.calleeId, 'call:state', { callId, status: 'connected', connectedAt: call.connectedAt });
   });
 
-  socket.on('call:end', ({ callId } = {}, acknowledge = () => {}) => {
+  socket.on('call:end', async ({ callId } = {}, acknowledge = () => {}) => {
     const call = activeCalls.get(callId);
     if (!call || !participantForCall(call, userId)) {
       acknowledge({ error: 'This call is no longer available' });
       return;
     }
-    finishCall(call, call.status === 'ringing' ? 'cancelled' : 'ended', userId);
-    const ended = { callId, status: call.status, endedBy: userId };
+    try {
+      await finishCall(call, call.status === 'ringing' ? 'cancelled' : 'ended', userId);
+    } catch {
+      acknowledge({ error: 'Call ended, but history could not be saved.' });
+      return;
+    }
+    const ended = {
+      callId,
+      status: call.status,
+      endedBy: userId,
+      endedAt: call.endedAt,
+      connectedAt: call.connectedAt || null,
+      durationSeconds: call.durationSeconds,
+      type: call.type,
+    };
     emitToUser(call.callerId, 'call:ended', ended);
     emitToUser(call.calleeId, 'call:ended', ended);
-    acknowledge({ ok: true });
+    acknowledge({ ok: true, call: ended });
   });
 
   socket.on('disconnect', () => {
