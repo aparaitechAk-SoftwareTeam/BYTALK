@@ -17,16 +17,17 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Linking,
+  Switch,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { io } from 'socket.io-client';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { LinearGradient } from 'expo-linear-gradient';
 import { createPeerConnection, getLocalMediaStream, makeIceCandidate, makeSessionDescription, setAudioRoute, startAudioRoute, stopAudioRoute, switchCamera } from './rtc';
 import CallAudio from './CallAudio';
 import CallVideo from './CallVideo';
 import { configureSubscription, purchasePlan, restorePurchases } from './src/subscription';
+import { speakText, speakEnglish, stopSpeech, isSpeaking, LANGUAGE_LOCALES } from './src/utils/speechHelper';
 
 const welcomeImage = require('./assets/bytalk-welcome-art.png');
 
@@ -493,6 +494,28 @@ function App() {
   const [practiceStep, setPracticeStep] = useState('overview');
   const [practiceAnswer, setPracticeAnswer] = useState('');
   const [practiceProgress, setPracticeProgress] = useState(0);
+  const [practiceMode, setPracticeMode] = useState('searching');
+  const [practicePartner, setPracticePartner] = useState(null);
+  const [practiceSearchError, setPracticeSearchError] = useState('');
+  const [aiSession, setAiSession] = useState(null);
+  const [aiMessages, setAiMessages] = useState([]);
+  const [aiDraft, setAiDraft] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState('');
+  const [aiStartedAt, setAiStartedAt] = useState(null);
+  const [aiCompletion, setAiCompletion] = useState(null);
+  const [listeningForSpeech, setListeningForSpeech] = useState(false);
+  const [speakingMessageIndex, setSpeakingMessageIndex] = useState(null);
+  const [aiRating, setAiRating] = useState(0);
+  const [aiFeedback, setAiFeedback] = useState('');
+  const [aiFeedbackSubmitted, setAiFeedbackSubmitted] = useState(false);
+  const [aiFeedbackSubmitting, setAiFeedbackSubmitting] = useState(false);
+  const [settings, setSettings] = useState(null);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState('');
+  const [manageAccountError, setManageAccountError] = useState('');
+  const [accountPassword, setAccountPassword] = useState('');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState({ id: null, name: 'BYTALK' });
   const [messages, setMessages] = useState([]);
@@ -521,6 +544,13 @@ function App() {
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [callDuration, setCallDuration] = useState(0);
+  const [callCompletion, setCallCompletion] = useState(null);
+  const [feedbackRating, setFeedbackRating] = useState(0);
+  const [feedbackTags, setFeedbackTags] = useState([]);
+  const [feedbackComment, setFeedbackComment] = useState('');
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [feedbackError, setFeedbackError] = useState('');
   const [muted, setMuted] = useState(false);
   const [cameraEnabled, setCameraEnabled] = useState(true);
   const [speakerEnabled, setSpeakerEnabled] = useState(false);
@@ -547,6 +577,10 @@ function App() {
   screenRef.current = screen;
   callRef.current = call;
   partnersRef.current = partners;
+  const recentCallHistory = callHistory.filter((item) => {
+    const createdAt = Date.parse(item.createdAt);
+    return Number.isFinite(createdAt) && Date.now() - createdAt <= 86400000;
+  });
 
   // Auth form states
   const [loginEmail, setLoginEmail] = useState('');
@@ -563,6 +597,7 @@ function App() {
   const [regError, setRegError] = useState('');
 
   const [authBusy, setAuthBusy] = useState(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
   const [focusedField, setFocusedField] = useState('');
 
   // Reliable Health Check (/api/health)
@@ -912,18 +947,64 @@ function App() {
       .then(() => processCallSignal(signal));
   }
 
-  function finishCallLocally(status, notice = '') {
+  function finishCallLocally(status, notice = '', details = {}) {
+    const currentCall = callRef.current;
+    if (!currentCall || callCompletion) return;
     if (callExitTimerRef.current) clearTimeout(callExitTimerRef.current);
+    const endedAt = details.endedAt || new Date().toISOString();
+    const connectedAt = currentCall.connectedAt ? Date.parse(currentCall.connectedAt) : NaN;
+    const calculatedDuration = Number.isFinite(connectedAt)
+      ? Math.max(0, Math.floor((Date.parse(endedAt) - connectedAt) / 1000))
+      : 0;
+    const durationSeconds = Number.isFinite(Number(details.durationSeconds))
+      ? Math.max(0, Math.floor(Number(details.durationSeconds)))
+      : calculatedDuration;
     setCallNotice(notice);
     releaseCallMedia();
-    updateCall((previous) => previous ? { ...previous, status } : previous);
-    request('calls').then(setCallHistory).catch((error) => {
-      setCallHistoryError(error.message || 'Call ended, but call history could not be refreshed.');
-    });
-    callExitTimerRef.current = setTimeout(() => {
-      updateCall(null);
-      setScreen('discover');
-    }, 1800);
+    setCallCompletion({ ...currentCall, status, endedAt, durationSeconds });
+    setFeedbackRating(0);
+    setFeedbackTags([]);
+    setFeedbackComment('');
+    setFeedbackSubmitted(false);
+    setFeedbackError('');
+    setScreen('call-complete');
+    setTimeout(() => {
+      request('calls').then((history) => setCallHistory(history.filter((item) => Date.now() - Date.parse(item.createdAt) <= 86400000))).catch((error) => {
+        setCallHistoryError(error.message || 'Call ended, but call history could not be refreshed.');
+      });
+    }, 300);
+  }
+
+  function leaveCallCompletion() {
+    setCallCompletion(null);
+    updateCall(null);
+    setScreen('dashboard');
+  }
+
+  async function submitCallFeedback() {
+    if (!callCompletion?.id || feedbackSubmitting || feedbackSubmitted) return;
+    if (!feedbackRating) {
+      setFeedbackError('Please choose a star rating first.');
+      return;
+    }
+    setFeedbackSubmitting(true);
+    setFeedbackError('');
+    try {
+      await request(`calls/${encodeURIComponent(callCompletion.id)}/feedback`, {
+        method: 'POST',
+        body: JSON.stringify({
+          rating: feedbackRating,
+          tags: feedbackTags,
+          comment: feedbackComment,
+        }),
+      });
+      setFeedbackSubmitted(true);
+      request('calls').then((history) => setCallHistory(history.filter((item) => Date.now() - Date.parse(item.createdAt) <= 86400000))).catch(() => {});
+    } catch (error) {
+      setFeedbackError(error.message || 'Feedback could not be submitted.');
+    } finally {
+      setFeedbackSubmitting(false);
+    }
   }
 
   function emitWithAck(event, payload) {
@@ -1067,7 +1148,9 @@ function App() {
     if (!currentCall) return;
     if (currentCall.id) {
       try {
-        await emitWithAck('call:end', { callId: currentCall.id });
+        const result = await emitWithAck('call:end', { callId: currentCall.id });
+        finishCallLocally('Ended', notice, result.call || result);
+        return;
       } catch (error) {
         notice = notice ? `${notice} ${error.message}` : error.message;
       }
@@ -1268,13 +1351,13 @@ function App() {
         const title = status === 'connected' ? 'Connected' : 'Reconnecting';
         updateCall((previous) => previous ? { ...previous, status: title, connectedAt: connectedAt || previous.connectedAt } : previous);
       });
-      socket.on('call:missed', ({ callId }) => {
-        if (callRef.current?.id === callId) finishCallLocally('Missed', 'This call was not answered.');
+      socket.on('call:missed', ({ callId, endedAt, durationSeconds }) => {
+        if (callRef.current?.id === callId) finishCallLocally('Missed', 'This call was not answered.', { endedAt, durationSeconds });
       });
-      socket.on('call:rejected', ({ callId }) => {
-        if (callRef.current?.id === callId) finishCallLocally('Ended', 'The call was declined.');
+      socket.on('call:rejected', ({ callId, endedAt, durationSeconds }) => {
+        if (callRef.current?.id === callId) finishCallLocally('Rejected', 'The call was declined.', { endedAt, durationSeconds });
       });
-      socket.on('call:ended', ({ callId, status, reason }) => {
+      socket.on('call:ended', ({ callId, status, reason, endedAt, durationSeconds }) => {
         console.log('[BYTALK call] call ended', { callId, status, reason });
         if (callRef.current?.id !== callId) return;
         const message = reason === 'disconnected'
@@ -1282,7 +1365,7 @@ function App() {
           : reason === 'connection-timeout'
             ? 'The media connection could not be established.'
             : '';
-        finishCallLocally(status === 'missed' ? 'Missed' : 'Ended', message);
+        finishCallLocally(status === 'missed' ? 'Missed' : status === 'rejected' ? 'Rejected' : 'Ended', message, { endedAt, durationSeconds });
       });
       socket.connect();
     }
@@ -1376,7 +1459,7 @@ function App() {
   useEffect(() => {
     if (screen === 'dashboard' && activeAuthToken) {
       setCallHistoryError('');
-      request('calls').then(setCallHistory).catch((error) => {
+      request('calls').then((history) => setCallHistory(history.filter((item) => Date.now() - Date.parse(item.createdAt) <= 86400000))).catch((error) => {
         setCallHistoryError(error.message || 'Could not load call history.');
       });
       setConversations((previous) => previous.map((conversation) =>
@@ -1536,22 +1619,69 @@ function App() {
   };
 
   // LOGOUT HANDLER (Requirement 9)
-  const handleLogout = async () => {
-    leaveRoom();
-    socketRef.current?.disconnect();
-    await clearSession();
-    setSessionVersion((value) => value + 1);
-    setUserId(null);
-    setName('');
-    setCountry('');
-    setNativeLanguage('');
-    setLearningLanguage('English');
-    setLevel('Beginner');
-    setPracticeInterests([]);
-    setPartners([]);
-    setMessages([]);
-    setUnreadByUser({});
-    setScreen('welcome');
+  // Core logout logic — clears session, disconnects socket, resets state, navigates to welcome.
+  const performLogout = async () => {
+    if (logoutBusy) return;
+    setLogoutBusy(true);
+    try {
+      socketRef.current?.disconnect();
+      socketRef.current = null;
+      await clearSession();
+      setSessionVersion((value) => value + 1);
+      setUserId(null);
+      setName('');
+      setCountry('');
+      setNativeLanguage('');
+      setLearningLanguage('English');
+      setLevel('Beginner');
+      setPracticeInterests([]);
+      setPartners([]);
+      setMessages([]);
+      setUnreadByUser({});
+      setConversations([]);
+      setMessageBanner(null);
+      setLoginEmail('');
+      setLoginPassword('');
+      setLoginError('');
+      setRegName('');
+      setRegEmail('');
+      setRegPassword('');
+      setRegConfirmPassword('');
+      setRegError('');
+      setScreen('welcome');
+    } catch (error) {
+      console.warn('[BYTALK logout] clearSession failed, forcing local logout', error?.message);
+      setUserId(null);
+      setName('');
+      setScreen('welcome');
+    } finally {
+      setLogoutBusy(false);
+    }
+  };
+
+  // handleLogout — shows a confirmation dialog then calls performLogout.
+  // Always use this for user-initiated logout buttons.
+  const handleLogout = () => {
+    if (logoutBusy) return;
+    if (Platform.OS === 'web') {
+      if (typeof window !== 'undefined' && window.confirm) {
+        if (window.confirm('Are you sure you want to log out of BYTALK?')) {
+          performLogout();
+        }
+      } else {
+        performLogout();
+      }
+    } else {
+      Alert.alert(
+        'Log out?',
+        'Are you sure you want to log out of BYTALK?',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Log out', style: 'destructive', onPress: performLogout },
+        ],
+        { cancelable: true }
+      );
+    }
   };
 
   async function saveProfile(next) {
@@ -1667,11 +1797,249 @@ function App() {
     }
   }
 
-  function startPractice(topic = practiceTopic) {
+  async function beginPracticeTopic(topic = practiceTopic) {
     setPracticeTopic(topic);
     setPracticeAnswer('');
-    setPracticeStep('exercise');
+    setPracticeMode('searching');
+    setPracticePartner(null);
+    setPracticeSearchError('');
+    setPracticeStep('conversation');
     setScreen('practiceSession');
+    try {
+      const result = await request(`practice/partners?topic=${encodeURIComponent(topic.id)}&practiceOnly=true`);
+      const partner = result?.users?.[0] || null;
+      setPracticePartner(partner);
+      setPracticeMode(partner ? 'real' : 'none');
+    } catch (error) {
+      setPracticeMode('none');
+      setPracticeSearchError(error.message || 'Could not search for practice partners.');
+    }
+  }
+
+  function startPractice(topic = practiceTopic) {
+    beginPracticeTopic(topic);
+  }
+
+  async function startAiPractice(customTopic = null) {
+    const targetTopic = customTopic || practiceTopic;
+    if (customTopic) setPracticeTopic(customTopic);
+    stopSpeech();
+    setSpeakingMessageIndex(null);
+    setAiLoading(true);
+    setAiError('');
+    setAiMessages([]);
+    setAiCompletion(null);
+    setAiRating(0);
+    setAiFeedback('');
+    setAiFeedbackSubmitted(false);
+    setAiDraft('');
+    setScreen('aiPractice'); // Open AI screen immediately
+
+    try {
+      const topicName = targetTopic.id || targetTopic.title || 'All Topics';
+      const result = await request('practice/ai/start', {
+        method: 'POST',
+        body: JSON.stringify({
+          topic: topicName,
+          language: learningLanguage || 'English',
+          level: level || 'Beginner',
+        }),
+      });
+
+      setAiSession(result);
+      const initialMessage = result.message || {
+        role: 'assistant',
+        content: result.response || 'Hello! I am BYTALK AI. How can I help you practice today?',
+        timestamp: new Date().toISOString(),
+      };
+      setAiMessages([initialMessage]);
+      setAiStartedAt(Date.now());
+      setPracticeMode('ai');
+
+      // Speak greeting in user's learning language
+      speakText(initialMessage.content, learningLanguage || 'English');
+      return true;
+    } catch (error) {
+      setAiError(error.message || 'AI practice could not be started.');
+      return false;
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  function toggleMessageSpeech(content, index) {
+    if (speakingMessageIndex === index) {
+      stopSpeech();
+      setSpeakingMessageIndex(null);
+    } else {
+      stopSpeech();
+      setSpeakingMessageIndex(index);
+      speakText(
+        content,
+        learningLanguage || 'English',
+        () => setSpeakingMessageIndex(index),
+        () => setSpeakingMessageIndex(null)
+      );
+    }
+  }
+
+  async function sendAiMessage() {
+    const text = aiDraft.trim();
+    if (!text || aiLoading) return;
+
+    stopSpeech();
+    setSpeakingMessageIndex(null);
+    setAiDraft('');
+    const userMessage = {
+      role: 'user',
+      content: text,
+      timestamp: new Date().toISOString(),
+    };
+    setAiMessages((previous) => [...previous, userMessage]);
+    setAiLoading(true);
+    setAiError('');
+
+    try {
+      let result;
+      if (aiSession?.sessionId) {
+        result = await request(`practice/ai/${encodeURIComponent(aiSession.sessionId)}/messages`, {
+          method: 'POST',
+          body: JSON.stringify({
+            text,
+            topic: practiceTopic.id || practiceTopic.title,
+            language: learningLanguage,
+            proficiencyLevel: level,
+          }),
+        });
+      } else {
+        result = await request('ai/chat', {
+          method: 'POST',
+          body: JSON.stringify({
+            message: text,
+            topic: practiceTopic.id || practiceTopic.title,
+            language: learningLanguage,
+            proficiencyLevel: level,
+            conversationId: aiSession?.conversationId,
+          }),
+        });
+      }
+
+      const aiReply = result.message || {
+        role: 'assistant',
+        content: result.response || '',
+        timestamp: new Date().toISOString(),
+      };
+      setAiMessages((previous) => [...previous, aiReply]);
+
+      // Speak response in target language
+      speakText(aiReply.content, learningLanguage || 'English');
+    } catch (error) {
+      setAiError(error.message || 'The AI could not respond. Please try again.');
+      setAiDraft(text);
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  function startSpeechRecognition() {
+    if (typeof window === 'undefined') {
+      Alert.alert('Voice input unavailable', 'Speech recognition is not available on this device.');
+      return;
+    }
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) {
+      Alert.alert('Voice input unavailable', 'Your browser does not support speech recognition. You can continue typing below.');
+      return;
+    }
+
+    try {
+      const recognition = new Recognition();
+      const locale = (LANGUAGE_LOCALES && LANGUAGE_LOCALES[learningLanguage]) || 'en-US';
+      recognition.lang = locale;
+      recognition.interimResults = false;
+      recognition.continuous = false;
+
+      recognition.onstart = () => {
+        setListeningForSpeech(true);
+        setAiError('');
+      };
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        if (transcript) setAiDraft(transcript);
+      };
+      recognition.onerror = (e) => {
+        setListeningForSpeech(false);
+        if (e.error !== 'no-speech') {
+          setAiError(`Microphone notice: ${e.error}. You can continue typing below.`);
+        }
+      };
+      recognition.onend = () => {
+        setListeningForSpeech(false);
+      };
+      recognition.start();
+    } catch (err) {
+      setListeningForSpeech(false);
+      setAiError('Could not access microphone.');
+    }
+  }
+
+  async function endAiPractice() {
+    stopSpeech();
+    setSpeakingMessageIndex(null);
+
+    const sessionId = aiSession?.sessionId || aiSession?.conversationId;
+    if (!sessionId) {
+      setAiCompletion({
+        durationSeconds: Math.max(0, Math.floor((Date.now() - (aiStartedAt || Date.now())) / 1000)),
+        messageCount: aiMessages.length,
+        topic: practiceTopic.title,
+        language: learningLanguage,
+        level: level,
+      });
+      return;
+    }
+
+    try {
+      const result = await request(`practice/ai/${encodeURIComponent(sessionId)}/end`, {
+        method: 'POST',
+      });
+      setAiCompletion({
+        ...result,
+        topic: practiceTopic.title,
+        language: learningLanguage,
+        level: level,
+      });
+    } catch (error) {
+      setAiCompletion({
+        durationSeconds: Math.max(0, Math.floor((Date.now() - (aiStartedAt || Date.now())) / 1000)),
+        messageCount: aiMessages.length,
+        topic: practiceTopic.title,
+        language: learningLanguage,
+        level: level,
+      });
+    }
+  }
+
+  async function submitAiFeedback() {
+    if (!aiRating) {
+      Alert.alert('Rating required', 'Please select a star rating first.');
+      return;
+    }
+    const sessionId = aiSession?.sessionId || aiCompletion?.sessionId;
+    setAiFeedbackSubmitting(true);
+    try {
+      if (sessionId) {
+        await request(`practice/ai/${encodeURIComponent(sessionId)}/feedback`, {
+          method: 'POST',
+          body: JSON.stringify({ rating: aiRating, feedback: aiFeedback }),
+        });
+      }
+      setAiFeedbackSubmitted(true);
+    } catch {
+      setAiFeedbackSubmitted(true);
+    } finally {
+      setAiFeedbackSubmitting(false);
+    }
   }
 
   async function completePractice() {
@@ -1687,7 +2055,80 @@ function App() {
 
   function openPractice() {
     setPracticeStep('overview');
+    setPracticeMode('searching');
     setScreen('practice');
+  }
+
+  async function loadSettings() {
+    setSettingsLoading(true);
+    setSettingsError('');
+    try {
+      setSettings(await request('settings'));
+    } catch (error) {
+      setSettingsError(error.message || 'Could not load settings.');
+    } finally {
+      setSettingsLoading(false);
+    }
+  }
+
+  async function updateSettings(patch) {
+    setSettingsSaving(true);
+    setSettingsError('');
+    try {
+      const result = await request('settings', { method: 'PATCH', body: JSON.stringify(patch) });
+      setSettings((previous) => ({ ...previous, ...result.settings, ...(patch.notificationPreferences ? { notificationPreferences: { ...previous?.notificationPreferences, ...patch.notificationPreferences } } : {}), ...(patch.audioPreferences ? { audioPreferences: { ...previous?.audioPreferences, ...patch.audioPreferences } } : {}) }));
+      if (patch.learningLanguage) setLearningLanguage(patch.learningLanguage);
+      if (patch.level) setLevel(patch.level);
+    } catch (error) {
+      setSettingsError(error.message || 'Could not save this setting.');
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
+  async function exportAccountData() {
+    try {
+      const data = await request('account/export');
+      const json = JSON.stringify(data, null, 2);
+      if (Platform.OS === 'web' && typeof document !== 'undefined') {
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+        link.download = 'bytalk-personal-data.json';
+        link.click();
+        URL.revokeObjectURL(link.href);
+      } else {
+        Alert.alert('Data ready', 'Your personal data was prepared. Downloading is available in the web app.');
+      }
+    } catch (error) {
+      setManageAccountError(error.message || 'Could not export your data.');
+    }
+  }
+
+  async function logoutAllDevices() {
+    try {
+      await request('account/logout-all', { method: 'POST' });
+      await performLogout();
+    } catch (error) {
+      setManageAccountError(error.message || 'Could not log out from all devices.');
+    }
+  }
+
+  async function deleteAccount() {
+    try {
+      await request('account', { method: 'DELETE', body: JSON.stringify({ confirmation: 'DELETE', password: accountPassword }) });
+      await handleLogout();
+    } catch (error) {
+      setManageAccountError(error.message || 'Could not delete the account.');
+    }
+  }
+
+  async function unblockUser(blockedUser) {
+    try {
+      await request(`users/${encodeURIComponent(blockedUser.id)}/block`, { method: 'DELETE' });
+      setSettings((previous) => ({ ...previous, blockedUsers: (previous?.blockedUsers || []).filter((item) => item.id !== blockedUser.id) }));
+    } catch (error) {
+      setSettingsError(error.message || 'Could not unblock this user.');
+    }
   }
 
   const tabItems = [
@@ -1773,8 +2214,17 @@ function App() {
                   <View style={{ width: 7, height: 7, borderRadius: 6, backgroundColor: backendUp ? '#168653' : '#F0B64A' }} />
                   <Txt size={11} color={muted}>{backendUp ? 'API Online' : 'API Offline'}</Txt>
                 </View>
-                <TouchableOpacity onPress={handleLogout} style={styles.topLogoutButton} activeOpacity={0.7}>
-                  <Ionicons name="log-out-outline" size={18} color={COLORS.textSecondary} />
+                <TouchableOpacity
+                  onPress={handleLogout}
+                  style={[styles.topLogoutButton, logoutBusy && { opacity: 0.45 }]}
+                  activeOpacity={0.7}
+                  disabled={logoutBusy}
+                  accessibilityRole="button"
+                  accessibilityLabel="Log out of BYTALK"
+                >
+                  {logoutBusy
+                    ? <ActivityIndicator size="small" color={COLORS.textSecondary} />
+                    : <Ionicons name="log-out-outline" size={18} color={COLORS.textSecondary} />}
                 </TouchableOpacity>
               </View>
             </View>
@@ -2628,6 +3078,93 @@ function App() {
             </>
           )}
 
+          {screen === 'call-complete' && callCompletion && (
+            <ScrollView contentContainerStyle={styles.callCompletionScreen} showsVerticalScrollIndicator={false}>
+              <LinearGradient
+                colors={['#FFF1E9', '#FFFFFF']}
+                style={styles.callCompletionCard}
+              >
+                {callCompletion.peer.profilePhotoUrl ? (
+                  <Image
+                    source={{ uri: callCompletion.peer.profilePhotoUrl }}
+                    style={styles.callCompletionAvatar}
+                    accessibilityLabel={`${callCompletion.peer.name}'s profile picture`}
+                  />
+                ) : (
+                  <View style={[styles.callCompletionAvatar, styles.callCompletionAvatarFallback]}>
+                    <Txt color="#FFFFFF" size={30} bold>{callCompletion.peer.name?.charAt(0)?.toUpperCase() || '?'}</Txt>
+                  </View>
+                )}
+                <Txt size={28} bold style={{ marginTop: 16, textAlign: 'center' }}>Great Job! 🎉</Txt>
+                <Txt size={14} color={muted} style={{ textAlign: 'center', marginTop: 8, lineHeight: 21 }}>
+                  You completed your conversation. Keep practicing and improving!
+                </Txt>
+                <Txt size={17} bold style={{ marginTop: 15 }}>{callCompletion.peer.name}</Txt>
+                <Txt size={13} color={muted} style={{ marginTop: 5 }}>
+                  {callCompletion.type === 'video' ? 'Video call' : 'Voice call'} · {String(Math.floor(callCompletion.durationSeconds / 60)).padStart(2, '0')}:{String(callCompletion.durationSeconds % 60).padStart(2, '0')}
+                </Txt>
+              </LinearGradient>
+
+              <Section title="How was your conversation?">
+                {feedbackSubmitted ? (
+                  <View style={styles.feedbackThankYou}>
+                    <Ionicons name="checkmark-circle" size={34} color="#168653" />
+                    <Txt color="#168653" bold size={16} style={{ marginTop: 8 }}>Thank you for your feedback!</Txt>
+                    <Txt color={muted} size={12} style={{ marginTop: 5, textAlign: 'center' }}>Your review helps make BYTALK better.</Txt>
+                  </View>
+                ) : (
+                  <>
+                    <View style={styles.feedbackStars}>
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <TouchableOpacity
+                          key={star}
+                          accessibilityRole="button"
+                          accessibilityLabel={`Rate ${star} star${star === 1 ? '' : 's'}`}
+                          onPress={() => setFeedbackRating(star)}
+                          style={{ padding: 5 }}
+                        >
+                          <Ionicons name={star <= feedbackRating ? 'star' : 'star-outline'} size={34} color={star <= feedbackRating ? '#F59E0B' : '#D1D5DB'} />
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                    <View style={styles.feedbackTags}>
+                      {['Great conversation', 'Friendly person', 'Helpful practice', 'Good communication', 'Poor connection'].map((tag) => {
+                        const selectedTag = feedbackTags.includes(tag);
+                        return (
+                          <TouchableOpacity
+                            key={tag}
+                            onPress={() => setFeedbackTags((previous) => selectedTag
+                              ? previous.filter((item) => item !== tag)
+                              : [...previous, tag])}
+                            style={[styles.feedbackTag, selectedTag && styles.feedbackTagSelected]}
+                          >
+                            <Txt size={12} color={selectedTag ? orange : muted} bold={selectedTag}>{tag}</Txt>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                    <TextInput
+                      value={feedbackComment}
+                      onChangeText={setFeedbackComment}
+                      placeholder="Share your feedback..."
+                      placeholderTextColor="#9CA3AF"
+                      multiline
+                      maxLength={1000}
+                      style={styles.feedbackInput}
+                    />
+                    {feedbackError ? <Txt color={COLORS.error} size={12} style={{ marginBottom: 8 }}>{feedbackError}</Txt> : null}
+                    <Btn label="Submit Feedback" onPress={submitCallFeedback} loading={feedbackSubmitting} />
+                  </>
+                )}
+              </Section>
+              {!feedbackSubmitted ? (
+                <Btn label="Skip" outline onPress={leaveCallCompletion} />
+              ) : (
+                <Btn label="Back to profile" onPress={leaveCallCompletion} />
+              )}
+            </ScrollView>
+          )}
+
           {screen === 'call' && call && (
             <View style={styles.callScreen}>
               <View style={styles.callHeader}>
@@ -2819,6 +3356,12 @@ function App() {
                   <View style={[styles.progressFill, { width: `${practiceProgress}%` }]} />
                 </View>
                 <Btn label="Start Practice" onPress={() => startPractice()} style={{ marginTop: 15 }} />
+                <Btn
+                  label="Talk with AI Partner 🤖"
+                  outline
+                  onPress={() => startAiPractice(practiceTopic)}
+                  style={{ marginTop: 10 }}
+                />
               </View>
 
               <Txt size={17} bold style={{ marginBottom: 12 }}>Choose a conversation topic</Txt>
@@ -2827,7 +3370,7 @@ function App() {
                   key={topic.id}
                   accessibilityRole="button"
                   accessibilityLabel={`Practice ${topic.title}`}
-                  onPress={() => setPracticeTopic(topic)}
+                  onPress={() => beginPracticeTopic(topic)}
                   style={[styles.practiceTopicCard, practiceTopic.id === topic.id && styles.practiceTopicCardSelected]}
                 >
                   <View style={styles.practiceTopicIcon}>
@@ -2920,7 +3463,31 @@ function App() {
           {screen === 'practiceSession' && (
             <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 30 }}>
               <Header title={practiceTopic.title} subtitle={`Practice in ${learningLanguage || 'your learning language'}`} onBack={openPractice} />
-              {practiceStep === 'exercise' ? (
+              {practiceMode === 'searching' ? (
+                <View style={styles.practiceEmptyState}>
+                  <ActivityIndicator color={orange} />
+                  <Txt size={16} bold style={{ marginTop: 14 }}>Searching for a real partner…</Txt>
+                  <Txt color={muted} size={13} style={{ textAlign: 'center', marginTop: 6 }}>We are checking online registered users who match your topic and level.</Txt>
+                </View>
+              ) : practiceMode === 'none' ? (
+                <View style={styles.practiceEmptyState}>
+                  <Ionicons name="people-outline" size={52} color={orange} />
+                  <Txt size={20} bold style={{ marginTop: 12, textAlign: 'center' }}>No partner available right now!</Txt>
+                  <Txt color={muted} size={13} style={{ textAlign: 'center', marginTop: 8, lineHeight: 20 }}>Don't worry! You can practice your speaking skills with our AI conversation partner.</Txt>
+                  {practiceSearchError ? <Txt color={COLORS.error} size={12} style={{ textAlign: 'center', marginTop: 10 }}>{practiceSearchError}</Txt> : null}
+                  <Btn label={aiLoading ? 'Starting AI…' : 'Talk with AI'} onPress={async () => { const started = await startAiPractice(); if (started) setScreen('aiPractice'); }} loading={aiLoading} style={{ marginTop: 20 }} />
+                  <Btn label="Search Again" outline onPress={() => beginPracticeTopic(practiceTopic)} style={{ marginTop: 10 }} />
+                </View>
+              ) : practiceMode === 'real' ? (
+                <View style={styles.practiceEmptyState}>
+                  <Ionicons name="person-circle-outline" size={58} color={orange} />
+                  <Txt size={19} bold style={{ marginTop: 10 }}>Partner available</Txt>
+                  <Txt size={15} color={navy} bold style={{ marginTop: 8 }}>{practicePartner?.displayName || practicePartner?.name}</Txt>
+                  <Txt color={muted} size={13} style={{ textAlign: 'center', marginTop: 5 }}>Connected and ready to practice {practiceTopic.title}.</Txt>
+                  <Btn label="Start real conversation" onPress={() => openConversation(practicePartner)} style={{ marginTop: 18 }} />
+                  <Btn label="Search Again" outline onPress={() => beginPracticeTopic(practiceTopic)} style={{ marginTop: 10 }} />
+                </View>
+              ) : practiceStep === 'exercise' ? (
                 <>
                   <View style={styles.practicePromptCard}>
                     <Txt size={12} color={orange} bold>QUICK EXERCISE</Txt>
@@ -2967,6 +3534,321 @@ function App() {
                 </>
               )}
             </ScrollView>
+          )}
+
+          {screen === 'aiPractice' && (
+            <View style={styles.aiPracticeScreen}>
+              {/* Header */}
+              <View style={styles.aiHeaderContainer}>
+                <TouchableOpacity
+                  onPress={() => {
+                    stopSpeech();
+                    if (aiMessages.length > 2 && !aiCompletion) {
+                      Alert.alert(
+                        'Leave AI Practice?',
+                        'Would you like to finish this conversation or return to topics?',
+                        [
+                          { text: 'Cancel', style: 'cancel' },
+                          { text: 'End Session', onPress: endAiPractice },
+                          { text: 'Leave', style: 'destructive', onPress: () => { setAiSession(null); setScreen('practice'); } },
+                        ]
+                      );
+                    } else {
+                      setAiSession(null);
+                      setScreen('practice');
+                    }
+                  }}
+                  style={styles.aiBackButton}
+                  accessibilityRole="button"
+                  accessibilityLabel="Back to practice topics"
+                >
+                  <Ionicons name="arrow-back" size={22} color={navy} />
+                </TouchableOpacity>
+
+                <View style={styles.aiHeaderTitleSection}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
+                    <View style={styles.aiAvatarSmall}>
+                      <Ionicons name="sparkles" size={16} color="#FFFFFF" />
+                    </View>
+                    <Txt size={16} bold>BYTALK AI Partner</Txt>
+                    <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: '#168653' }} />
+                  </View>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                    <View style={styles.aiHeaderBadge}>
+                      <Txt size={11} color={orange} bold>{practiceTopic.title}</Txt>
+                    </View>
+                    <View style={styles.aiHeaderBadge}>
+                      <Txt size={11} color={muted}>{learningLanguage || 'English'} · {level || 'Beginner'}</Txt>
+                    </View>
+                  </View>
+                </View>
+
+                {!aiCompletion && (
+                  <TouchableOpacity
+                    onPress={endAiPractice}
+                    style={styles.aiEndSessionBtn}
+                    accessibilityRole="button"
+                    accessibilityLabel="End practice session"
+                  >
+                    <Txt size={12} color={COLORS.error} bold>End Practice</Txt>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              {aiCompletion ? (
+                /* End Practice Completion Screen */
+                <ScrollView contentContainerStyle={styles.aiCompletionContainer}>
+                  <View style={styles.aiCompletionCard}>
+                    <Txt size={44}>🎉</Txt>
+                    <Txt size={24} bold style={{ marginTop: 10 }}>Great Job!</Txt>
+                    <Txt color={muted} size={14} style={{ textAlign: 'center', marginTop: 6, lineHeight: 20 }}>
+                      You completed an AI conversation session on <Txt bold color={navy}>{aiCompletion.topic || practiceTopic.title}</Txt> in <Txt bold color={orange}>{aiCompletion.language || learningLanguage}</Txt>.
+                    </Txt>
+
+                    {/* Stats Grid */}
+                    <View style={styles.aiStatsGrid}>
+                      <View style={styles.aiStatBox}>
+                        <Txt size={20} bold color={orange}>
+                          {String(Math.floor((aiCompletion.durationSeconds || 0) / 60)).padStart(2, '0')}:{String((aiCompletion.durationSeconds || 0) % 60).padStart(2, '0')}
+                        </Txt>
+                        <Txt size={11} color={muted} style={{ marginTop: 4 }}>Duration</Txt>
+                      </View>
+                      <View style={styles.aiStatBox}>
+                        <Txt size={20} bold color={orange}>{aiCompletion.messageCount || aiMessages.length}</Txt>
+                        <Txt size={11} color={muted} style={{ marginTop: 4 }}>Messages</Txt>
+                      </View>
+                      <View style={styles.aiStatBox}>
+                        <Txt size={14} bold color={navy} numberOfLines={1}>{aiCompletion.level || level}</Txt>
+                        <Txt size={11} color={muted} style={{ marginTop: 4 }}>Proficiency</Txt>
+                      </View>
+                    </View>
+
+                    {/* Feedback Rating */}
+                    <View style={styles.aiRatingSection}>
+                      <Txt size={15} bold style={{ textAlign: 'center', marginBottom: 10 }}>
+                        How was your conversation?
+                      </Txt>
+                      {aiFeedbackSubmitted ? (
+                        <View style={{ alignItems: 'center', paddingVertical: 10 }}>
+                          <Ionicons name="checkmark-circle" size={32} color="#168653" />
+                          <Txt color="#168653" bold size={14} style={{ marginTop: 6 }}>Thank you for your feedback!</Txt>
+                        </View>
+                      ) : (
+                        <>
+                          <View style={styles.aiStarsRow}>
+                            {[1, 2, 3, 4, 5].map((star) => (
+                              <TouchableOpacity
+                                key={star}
+                                onPress={() => setAiRating(star)}
+                                accessibilityRole="button"
+                                accessibilityLabel={`Rate ${star} stars`}
+                                style={{ padding: 6 }}
+                              >
+                                <Ionicons
+                                  name={star <= aiRating ? 'star' : 'star-outline'}
+                                  size={32}
+                                  color={star <= aiRating ? '#F59E0B' : '#D1D5DB'}
+                                />
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                          <TextInput
+                            value={aiFeedback}
+                            onChangeText={setAiFeedback}
+                            placeholder="Optional written feedback or note..."
+                            placeholderTextColor="#9CA3AF"
+                            maxLength={500}
+                            style={styles.aiFeedbackInput}
+                          />
+                          <Btn
+                            label={aiFeedbackSubmitting ? 'Saving...' : 'Submit Rating'}
+                            outline
+                            onPress={submitAiFeedback}
+                            disabled={aiFeedbackSubmitting || !aiRating}
+                            style={{ marginTop: 10, paddingVertical: 10 }}
+                          />
+                        </>
+                      )}
+                    </View>
+
+                    {/* Actions */}
+                    <Btn
+                      label="Practice Another Topic"
+                      onPress={() => {
+                        setAiCompletion(null);
+                        setAiMessages([]);
+                        setScreen('practice');
+                      }}
+                      style={{ marginTop: 16, width: '100%' }}
+                    />
+                    <Btn
+                      label="Find a Human Partner"
+                      outline
+                      onPress={() => {
+                        setAiCompletion(null);
+                        setAiMessages([]);
+                        setScreen('discover');
+                      }}
+                      style={{ marginTop: 10, width: '100%' }}
+                    />
+                  </View>
+                </ScrollView>
+              ) : (
+                /* Chat Conversation Screen */
+                <>
+                  <ScrollView
+                    style={{ flex: 1 }}
+                    contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 24 }}
+                    keyboardShouldPersistTaps="handled"
+                  >
+                    {/* Topic guidance banner */}
+                    <View style={styles.aiTopicBanner}>
+                      <Ionicons name="bulb-outline" size={18} color={orange} style={{ marginRight: 8 }} />
+                      <Txt size={12} color={navy} style={{ flex: 1, lineHeight: 18 }}>
+                        Practicing <Txt bold color={orange}>{practiceTopic.title}</Txt> in <Txt bold color={navy}>{learningLanguage}</Txt> ({level} level). Speak or type your messages!
+                      </Txt>
+                    </View>
+
+                    {/* Message bubbles */}
+                    {aiMessages.map((message, index) => {
+                      const isAi = message.role === 'assistant' || message.role === 'model';
+                      const formattedTime = message.timestamp
+                        ? new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                        : '';
+
+                      return (
+                        <View
+                          key={`msg-${index}`}
+                          style={[
+                            styles.aiMessageRow,
+                            isAi ? styles.aiMessageRowLeft : styles.aiMessageRowRight,
+                          ]}
+                        >
+                          {isAi && (
+                            <View style={styles.aiBubbleAvatar}>
+                              <Ionicons name="sparkles" size={14} color="#FFFFFF" />
+                            </View>
+                          )}
+                          <View
+                            style={[
+                              styles.aiMessageBubble,
+                              isAi ? styles.aiAssistantBubble : styles.aiUserBubble,
+                            ]}
+                          >
+                            <Txt
+                              color={isAi ? navy : '#FFFFFF'}
+                              size={14}
+                              style={{ lineHeight: 21 }}
+                            >
+                              {message.content}
+                            </Txt>
+                            <View style={styles.aiMessageMetaRow}>
+                              {formattedTime ? (
+                                <Txt size={10} color={isAi ? muted : '#FFE0D3'}>
+                                  {formattedTime}
+                                </Txt>
+                              ) : null}
+                              {isAi && (
+                                <TouchableOpacity
+                                  onPress={() => toggleMessageSpeech(message.content, index)}
+                                  style={styles.aiAudioButton}
+                                  accessibilityRole="button"
+                                  accessibilityLabel="Play audio"
+                                >
+                                  <Ionicons
+                                    name={speakingMessageIndex === index ? 'volume-high' : 'volume-medium-outline'}
+                                    size={16}
+                                    color={speakingMessageIndex === index ? orange : muted}
+                                  />
+                                  {speakingMessageIndex === index && (
+                                    <Txt size={10} color={orange} bold style={{ marginLeft: 3 }}>
+                                      Speaking...
+                                    </Txt>
+                                  )}
+                                </TouchableOpacity>
+                              )}
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })}
+
+                    {/* Typing indicator */}
+                    {aiLoading && (
+                      <View style={[styles.aiMessageRow, styles.aiMessageRowLeft]}>
+                        <View style={styles.aiBubbleAvatar}>
+                          <Ionicons name="sparkles" size={14} color="#FFFFFF" />
+                        </View>
+                        <View style={[styles.aiMessageBubble, styles.aiAssistantBubble, { flexDirection: 'row', alignItems: 'center', gap: 8 }]}>
+                          <ActivityIndicator size="small" color={orange} />
+                          <Txt size={13} color={muted} italic>BYTALK AI is thinking...</Txt>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* Error display */}
+                    {aiError ? (
+                      <View style={styles.aiErrorCard}>
+                        <Ionicons name="alert-circle" size={20} color={COLORS.error} style={{ marginRight: 8 }} />
+                        <View style={{ flex: 1 }}>
+                          <Txt size={13} color={COLORS.error} bold>Connection Error</Txt>
+                          <Txt size={12} color={COLORS.error} style={{ marginTop: 2, lineHeight: 17 }}>{aiError}</Txt>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => {
+                            if (aiMessages.length === 0) startAiPractice(practiceTopic);
+                            else sendAiMessage();
+                          }}
+                          style={styles.aiRetryButton}
+                        >
+                          <Txt size={12} color={orange} bold>Retry</Txt>
+                        </TouchableOpacity>
+                      </View>
+                    ) : null}
+                  </ScrollView>
+
+                  {/* Input Composer */}
+                  <View style={styles.aiComposer}>
+                    <TouchableOpacity
+                      onPress={startSpeechRecognition}
+                      style={[styles.aiMicButton, listeningForSpeech && styles.aiMicButtonActive]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Voice speech to text"
+                    >
+                      <Ionicons
+                        name={listeningForSpeech ? 'mic' : 'mic-outline'}
+                        size={22}
+                        color={listeningForSpeech ? '#FFFFFF' : orange}
+                      />
+                    </TouchableOpacity>
+
+                    <TextInput
+                      value={aiDraft}
+                      onChangeText={setAiDraft}
+                      placeholder={`Say something in ${learningLanguage || 'English'}...`}
+                      placeholderTextColor="#9CA3AF"
+                      multiline
+                      maxLength={1500}
+                      style={styles.aiInput}
+                    />
+
+                    <TouchableOpacity
+                      onPress={sendAiMessage}
+                      disabled={aiLoading || !aiDraft.trim()}
+                      style={[styles.aiSendButton, (!aiDraft.trim() || aiLoading) && { opacity: 0.5 }]}
+                      accessibilityRole="button"
+                      accessibilityLabel="Send message"
+                    >
+                      {aiLoading ? (
+                        <ActivityIndicator size="small" color="#FFFFFF" />
+                      ) : (
+                        <Ionicons name="send" size={17} color="#FFFFFF" />
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                </>
+              )}
+            </View>
           )}
 
           {screen === 'premium' && (
@@ -3029,6 +3911,115 @@ function App() {
             </ScrollView>
           )}
 
+          {screen === 'settings' && (
+            <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 36 }}>
+              <Header title="Settings" subtitle="Personalize your BYTALK experience." onBack={() => setScreen('dashboard')} />
+              {settingsLoading ? <ActivityIndicator color={orange} style={{ margin: 20 }} /> : null}
+              {settingsError ? <Txt color={COLORS.error} size={12} style={{ marginBottom: 12 }}>{settingsError}</Txt> : null}
+              {settings ? (
+                <>
+                  <Section title="Personal Preferences">
+                    <Txt size={13} bold style={{ marginBottom: 8 }}>Learning language</Txt>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 14 }}>
+                      {LANGUAGES.slice(0, 12).map((language) => (
+                        <TouchableOpacity key={language} onPress={() => updateSettings({ learningLanguage: language })} style={[styles.settingsChoice, settings.learningLanguage === language && styles.settingsChoiceSelected]}>
+                          <Txt size={12} color={settings.learningLanguage === language ? orange : muted} bold={settings.learningLanguage === language}>{language}</Txt>
+                        </TouchableOpacity>
+                      ))}
+                    </ScrollView>
+                    <Txt size={13} bold style={{ marginBottom: 8 }}>Speaking level</Txt>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                      {['Beginner', 'Elementary', 'Intermediate', 'Upper Intermediate', 'Advanced', 'Fluent'].map((item) => (
+                        <TouchableOpacity key={item} onPress={() => updateSettings({ level: item })} style={[styles.settingsChoice, settings.level === item && styles.settingsChoiceSelected]}>
+                          <Txt size={12} color={settings.level === item ? orange : muted} bold={settings.level === item}>{item}</Txt>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                    <Txt size={12} color={muted} style={{ marginTop: 10 }}>Interface language: English (additional translations are not enabled yet).</Txt>
+                  </Section>
+                  <Section title="Notifications">
+                    {[
+                      ['push', 'Push notifications'],
+                      ['messages', 'Message notifications'],
+                      ['incomingCalls', 'Incoming call notifications'],
+                      ['missedCalls', 'Missed call notifications'],
+                      ['practiceReminders', 'Practice reminders'],
+                      ['subscriptions', 'Subscription notifications'],
+                    ].map(([key, label]) => (
+                      <View key={key} style={styles.settingsRow}>
+                        <Txt size={14} style={{ flex: 1 }}>{label}</Txt>
+                        <Switch value={Boolean(settings.notificationPreferences?.[key])} onValueChange={(value) => updateSettings({ notificationPreferences: { [key]: value } })} trackColor={{ false: '#D1D5DB', true: '#FFB39B' }} thumbColor={orange} />
+                      </View>
+                    ))}
+                  </Section>
+                  <Section title="Privacy and Safety">
+                    <View style={styles.settingsRow}>
+                      <View style={{ flex: 1 }}><Txt size={14}>Silence Mode</Txt><Txt size={11} color={muted}>Suppress non-essential sounds and notifications.</Txt></View>
+                      <Switch value={Boolean(settings.silenceMode)} onValueChange={(value) => updateSettings({ silenceMode: value })} trackColor={{ false: '#D1D5DB', true: '#FFB39B' }} thumbColor={orange} />
+                    </View>
+                    <Txt size={13} bold style={{ marginVertical: 10 }}>Blocked users</Txt>
+                    {settings.blockedUsers?.length ? settings.blockedUsers.map((blocked) => (
+                      <View key={blocked.id} style={styles.settingsRow}>
+                        <Txt size={14} style={{ flex: 1 }}>{blocked.name}</Txt>
+                        <TouchableOpacity onPress={() => unblockUser(blocked)}><Txt color={orange} size={12} bold>Unblock</Txt></TouchableOpacity>
+                      </View>
+                    )) : <Txt size={12} color={muted}>You have not blocked anyone.</Txt>}
+                  </Section>
+                  <Section title="Appearance and Audio">
+                    <Txt size={13} bold style={{ marginBottom: 8 }}>Appearance</Txt>
+                    <View style={{ flexDirection: 'row', gap: 8, marginBottom: 12 }}>
+                      {['light', 'system'].map((item) => <TouchableOpacity key={item} onPress={() => updateSettings({ appearance: item })} style={[styles.settingsChoice, settings.appearance === item && styles.settingsChoiceSelected]}><Txt size={12} color={settings.appearance === item ? orange : muted}>{item}</Txt></TouchableOpacity>)}
+                    </View>
+                    <Txt size={11} color={muted}>Dark mode is not exposed because the existing BYTALK theme does not yet support a complete dark palette.</Txt>
+                    <Txt size={12} color={muted}>Text size: {Math.round((settings.textScale || 1) * 100)}%</Txt>
+                    <View style={{ flexDirection: 'row', gap: 8, marginTop: 8 }}>
+                      {[0.9, 1, 1.1, 1.25].map((scale) => <TouchableOpacity key={scale} onPress={() => updateSettings({ textScale: scale })} style={styles.settingsChoice}><Txt size={12} color={orange}>{Math.round(scale * 100)}%</Txt></TouchableOpacity>)}
+                    </View>
+                    {Platform.OS !== 'web' ? (
+                      <>
+                        <Txt size={12} bold style={{ marginTop: 12, marginBottom: 8 }}>Audio manager preference</Txt>
+                        <View style={{ flexDirection: 'row', gap: 8 }}>
+                          {['system', 'speaker', 'earpiece'].map((manager) => <TouchableOpacity key={manager} onPress={() => updateSettings({ audioPreferences: { manager } })} style={[styles.settingsChoice, settings.audioPreferences?.manager === manager && styles.settingsChoiceSelected]}><Txt size={12} color={settings.audioPreferences?.manager === manager ? orange : muted}>{manager}</Txt></TouchableOpacity>)}
+                        </View>
+                        <Txt size={12} color={muted} style={{ marginTop: 12 }}>Hardware audio controls are device-dependent and may require restart.</Txt>
+                        {['echoCanceller', 'noiseSuppressor'].map((key) => <View key={key} style={styles.settingsRow}><Txt size={14} style={{ flex: 1 }}>{key === 'echoCanceller' ? 'Acoustic echo canceller' : 'Noise suppressor'}</Txt><Switch value={Boolean(settings.audioPreferences?.[key])} onValueChange={(value) => updateSettings({ audioPreferences: { [key]: value } })} trackColor={{ false: '#D1D5DB', true: '#FFB39B' }} thumbColor={orange} /></View>)}
+                      </>
+                    ) : <Txt size={12} color={muted} style={{ marginTop: 12 }}>Hardware audio controls are not available in the web browser.</Txt>}
+                  </Section>
+                  <Section title="Subscription">
+                    <Txt size={14}>Current plan: <Txt bold color={orange}>{settings.subscription?.plan?.name || 'Free'}</Txt></Txt>
+                    <Btn label="View available plans" outline onPress={openSubscription} style={{ marginTop: 12 }} />
+                    <Btn label="Restore purchase" outline onPress={restoreSubscription} disabled={subscriptionBusy} style={{ marginTop: 10 }} />
+                  </Section>
+                  <TouchableOpacity style={styles.settingsLinkRow} onPress={() => { setManageAccountError(''); setScreen('manage-account'); }}><Ionicons name="person-circle-outline" size={20} color={orange} /><Txt size={14} style={{ flex: 1, marginLeft: 10 }}>Manage Account</Txt><Ionicons name="chevron-forward" size={18} color={muted} /></TouchableOpacity>
+                  <TouchableOpacity style={styles.settingsLinkRow} onPress={() => setScreen('legal-terms')}><Ionicons name="document-text-outline" size={20} color={orange} /><Txt size={14} style={{ flex: 1, marginLeft: 10 }}>Terms of Service</Txt><Ionicons name="chevron-forward" size={18} color={muted} /></TouchableOpacity>
+                  <TouchableOpacity style={styles.settingsLinkRow} onPress={() => setScreen('legal-privacy')}><Ionicons name="shield-checkmark-outline" size={20} color={orange} /><Txt size={14} style={{ flex: 1, marginLeft: 10 }}>Privacy Policy</Txt><Ionicons name="chevron-forward" size={18} color={muted} /></TouchableOpacity>
+                </>
+              ) : null}
+            </ScrollView>
+          )}
+
+          {screen === 'manage-account' && (
+            <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 36 }}>
+              <Header title="Manage Account" subtitle="Manage access to your BYTALK account." onBack={() => setScreen('settings')} />
+              {manageAccountError ? <Txt color={COLORS.error} size={12} style={{ marginBottom: 12 }}>{manageAccountError}</Txt> : null}
+              <Btn label={logoutBusy ? 'Signing out...' : 'Log out'} outline loading={logoutBusy} disabled={logoutBusy} onPress={handleLogout} style={{ marginBottom: 12 }} />
+              <Btn label="Log out from all devices" outline onPress={() => Alert.alert('Log out everywhere?', 'All existing sessions will be invalidated.', [{ text: 'Cancel' }, { text: 'Continue', onPress: logoutAllDevices }])} style={{ marginBottom: 12 }} />
+              <Btn label="Download personal data" outline onPress={exportAccountData} style={{ marginBottom: 12 }} />
+              <Txt size={12} color={muted} style={{ marginBottom: 8 }}>Re-enter your BYTALK password before deleting your account. Google-linked account support is not configured in this build.</Txt>
+              <TextInput value={accountPassword} onChangeText={setAccountPassword} placeholder="Current password" placeholderTextColor="#9CA3AF" secureTextEntry style={styles.feedbackInput} />
+              <Btn label="Delete account" outline disabled={!accountPassword} onPress={() => Alert.alert('Delete account?', 'This permanently deletes your account, messages, and call history.', [{ text: 'Cancel' }, { text: 'Delete', style: 'destructive', onPress: deleteAccount }])} />
+            </ScrollView>
+          )}
+
+          {screen === 'legal-terms' && (
+            <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 36 }}><Header title="Terms of Service" onBack={() => setScreen('settings')} /><Txt size={13} color={muted} style={{ lineHeight: 21 }}>BYTALK provides language practice, messaging, and calling features. Use the service lawfully and respectfully. Do not harass, impersonate, abuse, or misuse the service. Calls and messages are between participants, and features may depend on device and subscription availability. BYTALK may restrict accounts that violate these terms. Contact the BYTALK team for the approved current terms before publishing this screen as a legal notice.</Txt></ScrollView>
+          )}
+
+          {screen === 'legal-privacy' && (
+            <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 36 }}><Header title="Privacy Policy" onBack={() => setScreen('settings')} /><Txt size={13} color={muted} style={{ lineHeight: 21 }}>BYTALK stores account profile information, preferences, messages, call history, and subscription entitlement information to provide the service. Authenticated access controls limit account data to its owner. Messages and call history are retained according to the service configuration. Do not publish this summary as the approved privacy policy until it has been reviewed and replaced with the current legal policy.</Txt></ScrollView>
+          )}
+
           {/* SCREEN 9: LEARNING DASHBOARD */}
           {screen === 'dashboard' && (
             <ScrollView contentContainerStyle={{ padding: 22 }}>
@@ -3086,20 +4077,22 @@ function App() {
                     <Txt color={COLORS.error} size={12}>{callHistoryError}  Tap to retry.</Txt>
                   </TouchableOpacity>
                 ) : null}
-                {callHistory.length === 0 ? (
+                {recentCallHistory.length === 0 ? (
                   <Txt size={12} color={muted}>Your incoming, outgoing, missed, and ended calls will appear here.</Txt>
-                ) : callHistory.map((item) => {
+                ) : recentCallHistory.map((item) => {
                   const outgoing = item.callerId === userId;
                   const otherUserId = outgoing ? item.calleeId : item.callerId;
-                  const otherUser = partners.find((partner) => partner.id === otherUserId);
+                  const otherUser = item.participant || partners.find((partner) => partner.id === otherUserId);
                   const callStatus = item.status ? item.status.charAt(0).toUpperCase() + item.status.slice(1) : 'Ended';
                   return (
                     <View key={item.id} style={styles.callHistoryRow}>
-                      <Ionicons
-                        name={item.status === 'missed' ? 'call-outline' : outgoing ? 'arrow-up-outline' : 'arrow-down-outline'}
-                        size={19}
-                        color={item.status === 'missed' ? COLORS.error : orange}
-                      />
+                      {otherUser?.profilePhotoUrl ? (
+                        <Image source={{ uri: otherUser.profilePhotoUrl }} style={{ width: 38, height: 38, borderRadius: 19 }} />
+                      ) : (
+                        <View style={[styles.avatarCircle, { width: 38, height: 38, backgroundColor: '#FFF0E8' }]}>
+                          <Txt color={orange} bold>{otherUser?.name?.charAt(0)?.toUpperCase() || '?'}</Txt>
+                        </View>
+                      )}
                       <View style={{ flex: 1, marginLeft: 10 }}>
                         <Txt size={13} bold>{otherUser?.name || 'BYTALK user'}</Txt>
                         <Txt size={11} color={muted}>
@@ -3108,7 +4101,7 @@ function App() {
                         </Txt>
                       </View>
                       <Txt size={10} color={muted}>
-                        {item.createdAt ? new Date(item.createdAt).toLocaleDateString() : ''}
+                        {item.createdAt ? new Date(item.createdAt).toLocaleString() : ''}
                       </Txt>
                     </View>
                   );
@@ -3145,14 +4138,26 @@ function App() {
                 />
               </Section>
               <Btn label="Update my level" outline onPress={() => setScreen('level')} style={{ marginBottom: 12 }} />
+              <TouchableOpacity onPress={() => { setScreen('settings'); loadSettings(); }} style={styles.settingsLinkRow}>
+                <Ionicons name="settings-outline" size={20} color={orange} />
+                <Txt size={14} style={{ flex: 1, marginLeft: 10 }}>Settings</Txt>
+                <Ionicons name="chevron-forward" size={18} color={muted} />
+              </TouchableOpacity>
               <Btn label="BYTALK Premium" onPress={openSubscription} style={{ marginBottom: 12 }} />
-              <Btn label="Log Out / Sign Out" outline onPress={handleLogout} style={{ marginBottom: 12 }} />
+              <Btn
+                label={logoutBusy ? 'Signing out...' : 'Log Out / Sign Out'}
+                outline
+                onPress={handleLogout}
+                loading={logoutBusy}
+                disabled={logoutBusy}
+                style={{ marginBottom: 12 }}
+              />
               <Btn label="Back to Welcome Screen" outline onPress={() => setScreen('welcome')} />
             </ScrollView>
           )}
 
           {/* BOTTOM TAB BAR (ONLY ON MAIN LOGGED-IN SCREENS) */}
-          {!['welcome', 'login', 'register', 'onboard', 'level', 'call'].includes(screen) && (
+          {!['welcome', 'login', 'register', 'onboard', 'level', 'call', 'call-complete', 'settings', 'manage-account', 'legal-terms', 'legal-privacy'].includes(screen) && (
             <View style={styles.tabBar}>
               {tabItems.map(([id, icon, label]) => (
                 <TouchableOpacity key={id} onPress={() => {
@@ -3580,6 +4585,67 @@ const styles = StyleSheet.create({
     backgroundColor: '#17172F',
     paddingBottom: 24,
   },
+  callCompletionScreen: {
+    padding: 22,
+    paddingBottom: 34,
+    backgroundColor: '#FFFFFF',
+  },
+  callCompletionCard: {
+    alignItems: 'center',
+    padding: 26,
+    borderRadius: 24,
+    marginBottom: 24,
+  },
+  callCompletionAvatar: {
+    width: 82,
+    height: 82,
+    borderRadius: 41,
+  },
+  callCompletionAvatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: orange,
+  },
+  feedbackStars: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  feedbackTags: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 14,
+  },
+  feedbackTag: {
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: border,
+    backgroundColor: '#FFFFFF',
+  },
+  feedbackTagSelected: {
+    borderColor: orange,
+    backgroundColor: '#FFF0E8',
+  },
+  feedbackInput: {
+    minHeight: 92,
+    padding: 13,
+    marginBottom: 12,
+    borderRadius: 13,
+    borderWidth: 1,
+    borderColor: border,
+    backgroundColor: '#FFFFFF',
+    color: navy,
+    textAlignVertical: 'top',
+  },
+  feedbackThankYou: {
+    alignItems: 'center',
+    padding: 20,
+    borderRadius: 14,
+    backgroundColor: '#F0FBF5',
+  },
   callHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3797,6 +4863,269 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     backgroundColor: '#F0FBF5',
     marginBottom: 22,
+  },
+  practiceEmptyState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 28,
+    minHeight: 280,
+    borderRadius: 20,
+    backgroundColor: '#FFF8F4',
+    borderWidth: 1,
+    borderColor: '#FFD8C9',
+  },
+  aiHeaderContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderColor: border,
+    backgroundColor: '#FFFFFF',
+    gap: 10,
+  },
+  aiBackButton: {
+    padding: 6,
+    borderRadius: 8,
+  },
+  aiHeaderTitleSection: {
+    flex: 1,
+  },
+  aiAvatarSmall: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: orange,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  aiHeaderBadge: {
+    backgroundColor: '#FFF0E8',
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 8,
+  },
+  aiEndSessionBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#FECDCA',
+    backgroundColor: '#FFF4F2',
+  },
+  aiTopicBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFF8F4',
+    padding: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#FFD8C9',
+    marginBottom: 14,
+  },
+  aiMessageRow: {
+    flexDirection: 'row',
+    marginBottom: 12,
+    alignItems: 'flex-end',
+  },
+  aiMessageRowLeft: {
+    justifyContent: 'flex-start',
+  },
+  aiMessageRowRight: {
+    justifyContent: 'flex-end',
+  },
+  aiBubbleAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: orange,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+    marginBottom: 4,
+  },
+  aiMessageMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    marginTop: 6,
+    gap: 8,
+  },
+  aiAudioButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+  },
+  aiErrorCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFF4F2',
+    borderColor: '#FECDCA',
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    marginVertical: 10,
+  },
+  aiRetryButton: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: orange,
+    marginLeft: 8,
+  },
+  aiMicButtonActive: {
+    backgroundColor: COLORS.error,
+  },
+  aiCompletionContainer: {
+    padding: 20,
+    alignItems: 'center',
+    flexGrow: 1,
+    justifyContent: 'center',
+  },
+  aiCompletionCard: {
+    width: '100%',
+    maxWidth: 420,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    padding: 24,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: border,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.06,
+    shadowRadius: 12,
+    elevation: 3,
+  },
+  aiStatsGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+    marginVertical: 20,
+    gap: 10,
+  },
+  aiStatBox: {
+    flex: 1,
+    backgroundColor: '#FFF8F4',
+    paddingVertical: 14,
+    paddingHorizontal: 8,
+    borderRadius: 14,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#FFE0D3',
+  },
+  aiRatingSection: {
+    width: '100%',
+    paddingVertical: 14,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: '#F1F3F7',
+    marginBottom: 8,
+  },
+  aiStarsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 6,
+    marginBottom: 12,
+  },
+  aiFeedbackInput: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: border,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 13,
+    color: navy,
+    maxHeight: 80,
+  },
+  aiPracticeScreen: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
+  aiMessageBubble: {
+    maxWidth: '86%',
+    padding: 13,
+    borderRadius: 16,
+    marginBottom: 10,
+  },
+  aiAssistantBubble: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#FFF1E9',
+    borderBottomLeftRadius: 4,
+  },
+  aiUserBubble: {
+    alignSelf: 'flex-end',
+    backgroundColor: orange,
+    borderBottomRightRadius: 4,
+  },
+  aiComposer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    padding: 12,
+    borderTopWidth: 1,
+    borderColor: border,
+  },
+  aiMicButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFF1E9',
+  },
+  aiInput: {
+    flex: 1,
+    minHeight: 42,
+    maxHeight: 90,
+    paddingHorizontal: 13,
+    borderRadius: 21,
+    borderWidth: 1,
+    borderColor: border,
+    color: navy,
+  },
+  aiSendButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: orange,
+  },
+  aiEndButton: {
+    paddingHorizontal: 7,
+    paddingVertical: 8,
+  },
+  settingsChoice: {
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: border,
+    backgroundColor: '#FFFFFF',
+  },
+  settingsChoiceSelected: {
+    borderColor: orange,
+    backgroundColor: '#FFF0E8',
+  },
+  settingsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 48,
+    paddingVertical: 7,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F3F7',
+  },
+  settingsLinkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F1F3F7',
   },
   phraseRow: {
     flexDirection: 'row',
