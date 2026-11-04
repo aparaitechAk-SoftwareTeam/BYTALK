@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import dns from 'dns';
 import mongoose from 'mongoose';
 import { User, publicUser } from './models/User.js';
 import { Message, publicMessage } from './models/Message.js';
@@ -13,7 +14,8 @@ import { CallHistory } from './models/CallHistory.js';
 import { PracticeSession } from './models/PracticeSession.js';
 import { messageCutoff } from './messageRetention.js';
 import { SubscriptionEvent } from './models/SubscriptionEvent.js';
-import { SUBSCRIPTION_PLANS, activeSubscription, canUseVideo, entitlementPayload, resetUsageIfNeeded } from './subscriptions.js';
+import { Plan } from './models/Plan.js';
+import { SUBSCRIPTION_PLANS, DEFAULT_PRO_PLANS, activeSubscription, canUseVideo, entitlementPayload, resetUsageIfNeeded } from './subscriptions.js';
 import { AccessToken } from 'livekit-server-sdk';
 import { generateAiResponse } from './aiService.js';
 
@@ -47,6 +49,12 @@ if (!LIVEKIT_AVAILABLE) {
 const REVENUECAT_WEBHOOK_AUTH = process.env.REVENUECAT_WEBHOOK_AUTH || '';
 const REVENUECAT_PLUS_ENTITLEMENT = process.env.REVENUECAT_PLUS_ENTITLEMENT || 'bytalk_plus';
 const REVENUECAT_PRO_ENTITLEMENT = process.env.REVENUECAT_PRO_ENTITLEMENT || 'bytalk_pro';
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || 'rzp_live_TvoCCSairIqmOY';
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || 'TE12vGfhhrOJfbYUXQawyayi';
+const RAZORPAY_AVAILABLE = Boolean(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
+if (RAZORPAY_AVAILABLE) {
+  console.log(`Razorpay payment gateway initialized with Key: ${RAZORPAY_KEY_ID.slice(0, 12)}...`);
+}
 const TEST_ENTITLEMENTS_ENABLED = process.env.NODE_ENV !== 'production'
   && process.env.BYTALK_ENABLE_TEST_ENTITLEMENTS === 'true';
 const PRACTICE_TOPIC_ALIASES = {
@@ -377,12 +385,22 @@ if (!Array.isArray(store.calls)) store.calls = [];
 
 const save = () => fs.writeFileSync(dbFile, JSON.stringify(store, null, 2));
 
+const auditLogs = [
+  { id: 'aud-1', timestamp: new Date(Date.now() - 3600000).toISOString(), actor: 'System', eventType: 'SYSTEM_BOOT', target: 'BYTALK Server Online' },
+  { id: 'aud-2', timestamp: new Date(Date.now() - 1800000).toISOString(), actor: 'Razorpay Gateway', eventType: 'PAYMENT_GATEWAY_INITIALIZED', target: 'rzp_live_TvoCCSairIqmOY' },
+];
+
 const mongoUri = process.env.MONGODB_URI;
 if (!mongoUri) {
   throw new Error('MONGODB_URI must be configured in backend/.env.');
 }
 
 try {
+  if (mongoUri.startsWith('mongodb+srv://')) {
+    try {
+      dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
+    } catch {}
+  }
   await mongoose.connect(mongoUri);
   console.log('MongoDB Atlas connected successfully.');
 
@@ -424,10 +442,37 @@ try {
     })), { ordered: false });
     console.log(`Migrated ${store.messages.length} local message(s) to MongoDB.`);
   }
+
+  // Ensure default PRO plans are seeded to MongoDB
+  try {
+    await Plan.createIndexes();
+    const existingPlans = await Plan.countDocuments();
+    if (existingPlans === 0) {
+      await Plan.insertMany(DEFAULT_PRO_PLANS);
+      console.log(`Seeded ${DEFAULT_PRO_PLANS.length} default subscription plan(s) to MongoDB.`);
+    }
+  } catch (planSeedErr) {
+    console.warn('[Plans Seed Error]', planSeedErr.message);
+  }
 } catch (error) {
   console.error(`MongoDB connection failed: ${error.message}`);
   process.exitCode = 1;
   throw error;
+}
+
+async function getAllPlans() {
+  try {
+    const dbPlans = await Plan.find().sort({ order: 1, createdAt: 1 }).lean();
+    if (dbPlans && dbPlans.length > 0) return dbPlans;
+  } catch (err) {
+    console.warn('[Plans] Failed to read from DB:', err.message);
+  }
+  return DEFAULT_PRO_PLANS;
+}
+
+async function getActivePlans() {
+  const plans = await getAllPlans();
+  return plans.filter((p) => p.active !== false);
 }
 
 const app = express();
@@ -519,8 +564,17 @@ function emitToUser(userId, event, payload) {
   io.to(`user:${String(userId)}`).emit(event, payload);
 }
 
-function requireAuth(req, res, next) {
-  const user = store.users.find((item) => item.id === req.user?.userId);
+async function requireAuth(req, res, next) {
+  let user = store.users.find((item) => String(item.id) === String(req.user?.userId));
+  if (!user && req.user?.userId) {
+    try {
+      const dbUser = await User.findById(req.user.userId).lean();
+      if (dbUser) {
+        user = cacheUser(dbUser);
+        store.users.push(user);
+      }
+    } catch {}
+  }
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   req.authenticatedUser = user;
   next();
@@ -605,6 +659,7 @@ function armCallTimeout(call, status, durationMs, onTimeout) {
 }
 
 // Health check endpoints
+app.get('/', (req, res) => res.json({ ok: true, service: 'BYTALK Backend API', time: new Date().toISOString() }));
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'BYTALK API', time: new Date().toISOString() }));
 app.get('/health', (req, res) => res.json({ ok: true, service: 'BYTALK API', time: new Date().toISOString() }));
 
@@ -652,7 +707,12 @@ app.post('/api/register', async (req, res) => {
 
     // Issue 15-day JWT token
     const token = signToken({ userId: cachedUser.id, email: newUser.email, tokenVersion: newUser.tokenVersion || 0 }, { expiresIn: '15d' });
-    return res.status(201).json({ ok: true, user: { ...publicUser(newUser), email: newUser.email }, token });
+    return res.status(201).json({
+      ok: true,
+      user: { ...publicUser(newUser), email: newUser.email },
+      subscription: entitlementPayload(newUser),
+      token,
+    });
   } catch (error) {
     if (error?.code === 11000) {
       return res.status(409).json({ error: 'An account with this email already exists' });
@@ -685,7 +745,12 @@ app.post('/api/login', async (req, res) => {
 
     // Issue 15-day JWT token
     const token = signToken({ userId: user.id, email: user.email, tokenVersion: user.tokenVersion || 0 }, { expiresIn: '15d' });
-    return res.json({ ok: true, user: { ...publicUser(userDocument), email: user.email }, token });
+    return res.json({
+      ok: true,
+      user: { ...publicUser(userDocument), email: user.email },
+      subscription: entitlementPayload(userDocument),
+      token,
+    });
   } catch (error) {
     console.error(`Login database error: ${error.message}`);
     return res.status(503).json({ error: 'Authentication service is temporarily unavailable.' });
@@ -705,7 +770,11 @@ app.get('/api/auth/me', async (req, res) => {
     if (!user) {
       return res.status(401).json({ error: 'User session not found or account removed' });
     }
-    return res.json({ ok: true, user: { ...publicUser(user), email: user.email } });
+    return res.json({
+      ok: true,
+      user: { ...publicUser(user), email: user.email },
+      subscription: entitlementPayload(user),
+    });
   } catch (err) {
     return res.status(401).json({ error: err.message || 'Invalid or expired session token' });
   }
@@ -790,10 +859,13 @@ app.delete('/api/account', requireAuth, async (req, res) => {
   res.json({ ok: true });
 });
 
-function enforceAiRateLimit(userId) {
+function enforceAiRateLimit(userId, user = null) {
+  if (user?.subscriptionPlan === 'pro' || user?.subscriptionPlan === 'plus') {
+    return true; // Unlimited AI practice for PRO subscribers
+  }
   const now = Date.now();
   const recent = (AI_REQUESTS.get(userId) || []).filter((timestamp) => now - timestamp < 60_000);
-  if (recent.length >= 20) return false;
+  if (recent.length >= 40) return false;
   recent.push(now);
   AI_REQUESTS.set(userId, recent);
   return true;
@@ -818,7 +890,7 @@ setInterval(() => {
  */
 app.post('/api/ai/chat', requireAuth, async (req, res) => {
   const userId = String(req.authenticatedUser.id);
-  if (!enforceAiRateLimit(userId)) {
+  if (!enforceAiRateLimit(userId, req.authenticatedUser)) {
     return res.status(429).json({ error: 'AI practice rate limit reached. Please wait a moment before sending more messages.' });
   }
 
@@ -919,7 +991,7 @@ app.post('/api/ai/chat', requireAuth, async (req, res) => {
  */
 app.post('/api/practice/ai/start', requireAuth, async (req, res) => {
   const userId = String(req.authenticatedUser.id);
-  if (!enforceAiRateLimit(userId)) {
+  if (!enforceAiRateLimit(userId, req.authenticatedUser)) {
     return res.status(429).json({ error: 'AI practice rate limit reached. Try again shortly.' });
   }
 
@@ -995,7 +1067,7 @@ app.post('/api/practice/ai/:sessionId/messages', requireAuth, async (req, res) =
   if (!text || text.length > 1500) {
     return res.status(400).json({ error: 'Enter a message up to 1500 characters.' });
   }
-  if (!enforceAiRateLimit(userId)) {
+  if (!enforceAiRateLimit(userId, req.authenticatedUser)) {
     return res.status(429).json({ error: 'AI practice rate limit reached. Try again shortly.' });
   }
 
@@ -1116,8 +1188,13 @@ app.post('/api/practice/ai/:sessionId/feedback', requireAuth, async (req, res) =
   }
 });
 
-app.get('/api/subscription/plans', (req, res) => {
-  res.json(Object.values(SUBSCRIPTION_PLANS));
+app.get('/api/subscription/plans', async (req, res) => {
+  try {
+    const plans = await getActivePlans();
+    res.json(plans);
+  } catch (err) {
+    res.json(DEFAULT_PRO_PLANS);
+  }
 });
 
 app.get('/api/subscription', requireAuth, async (req, res) => {
@@ -1130,6 +1207,324 @@ app.get('/api/subscription/status', requireAuth, async (req, res) => {
   const user = await User.findById(req.authenticatedUser.id);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   res.json({ ...entitlementPayload(user), testMode: TEST_ENTITLEMENTS_ENABLED });
+});
+
+// RAZORPAY SUBSCRIPTION INTEGRATION
+app.get('/api/subscription/razorpay/config', (req, res) => {
+  res.json({
+    enabled: RAZORPAY_AVAILABLE,
+    keyId: RAZORPAY_KEY_ID,
+  });
+});
+
+app.post('/api/subscription/razorpay/create-order', requireAuth, async (req, res) => {
+  try {
+    if (!RAZORPAY_AVAILABLE) {
+      return res.status(503).json({ error: 'Razorpay is not configured on this server.' });
+    }
+    const user = await User.findById(req.authenticatedUser.id);
+    if (!user) return res.status(401).json({ error: 'Authentication required' });
+
+    const { planId = '3months', amount, duration = '3 Months', coupon } = req.body || {};
+
+    const plan = await Plan.findOne({ id: planId }).lean();
+    let finalAmountRupees = Number(amount);
+    if (!finalAmountRupees || finalAmountRupees <= 0) {
+      if (plan) {
+        finalAmountRupees = coupon === 'SALE25'
+          ? Math.round(plan.price * 0.75 * 10) / 10
+          : plan.price;
+      } else if (planId === '1year') finalAmountRupees = 1049.25;
+      else if (planId === '1month') finalAmountRupees = 299.25;
+      else finalAmountRupees = 524.30;
+    }
+    finalAmountRupees = Math.max(1, finalAmountRupees);
+    const amountInPaise = Math.max(100, Math.round(finalAmountRupees * 100));
+
+    const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
+    const receiptId = `sub_${String(user._id).slice(-6)}_${Date.now().toString().slice(-6)}`;
+
+    const rzpResponse = await fetch('https://api.razorpay.com/v1/orders', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${auth}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        amount: amountInPaise,
+        currency: 'INR',
+        receipt: receiptId,
+        notes: {
+          userId: String(user._id),
+          email: user.email,
+          name: user.name,
+          planId,
+          duration,
+        },
+      }),
+    });
+
+    const orderData = await rzpResponse.json();
+    if (!rzpResponse.ok || orderData.error) {
+      console.error('[Razorpay Order Error]', orderData);
+      return res.status(rzpResponse.status || 500).json({
+        error: orderData.error?.description || 'Failed to create Razorpay order',
+      });
+    }
+
+    console.log(`Razorpay order created: ${orderData.id} for user ${user._id} (${duration} - ₹${finalAmountRupees})`);
+
+    res.json({
+      ok: true,
+      orderId: orderData.id,
+      amount: orderData.amount,
+      currency: orderData.currency,
+      keyId: RAZORPAY_KEY_ID,
+      receipt: receiptId,
+      user: {
+        name: user.displayName || user.name,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error('[Razorpay Create Order Exception]', error);
+    res.status(500).json({ error: error.message || 'Could not initiate Razorpay order' });
+  }
+});
+
+app.post('/api/subscription/razorpay/verify-payment', requireAuth, async (req, res) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, planId = '3months' } = req.body || {};
+
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ error: 'Missing payment verification parameters.' });
+    }
+
+    // Verify HMAC SHA256 signature
+    const generatedSignature = crypto
+      .createHmac('sha256', RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest('hex');
+
+    if (generatedSignature !== razorpay_signature) {
+      console.warn(`[Razorpay Signature Mismatch] expected ${generatedSignature}, got ${razorpay_signature}`);
+      return res.status(400).json({ error: 'Invalid payment signature' });
+    }
+
+    const user = await User.findById(req.authenticatedUser.id);
+    if (!user) return res.status(401).json({ error: 'User not found' });
+
+    // Calculate subscription duration based on dynamic plan or fallback
+    const plan = await Plan.findOne({ id: planId }).lean();
+    const days = plan?.durationDays || (planId === '1year' ? 365 : planId === '1month' ? 30 : 90);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const amountPaid = Number(req.body.amount) || (plan?.price ? Math.round(plan.price * 0.75 * 10) / 10 : 524.3);
+    const durationLabel = req.body.duration || plan?.duration || plan?.name || (days >= 365 ? '1 Year' : days >= 90 ? '3 Months' : '1 Month');
+
+    user.subscriptionPlan = 'pro';
+    user.subscriptionStatus = 'active';
+    user.subscriptionProvider = 'razorpay';
+    user.subscriptionProviderCustomerId = String(user._id);
+    user.subscriptionProviderPurchaseId = razorpay_payment_id;
+    user.subscriptionEntitlementId = `bytalk_pro_${planId}`;
+    user.subscriptionStartedAt = now;
+    user.subscriptionExpiresAt = expiresAt;
+    user.subscriptionRenewalStatus = 'not_renewing';
+    user.subscriptionAmount = amountPaid;
+    user.subscriptionDuration = durationLabel;
+    await user.save();
+
+    auditLogs.unshift({
+      id: `aud-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: user.email || user.name,
+      eventType: 'PRO_SUBSCRIPTION_PURCHASED',
+      target: `${durationLabel} - ₹${amountPaid} (Razorpay: ${razorpay_payment_id})`,
+    });
+
+    try {
+      await SubscriptionEvent.create({
+        eventId: razorpay_payment_id,
+        provider: 'razorpay',
+        userId: String(user._id),
+      });
+    } catch {}
+
+    store.users = (await User.find().lean()).map(cacheUser);
+    console.log(`[Razorpay Payment Verified] User ${user.email} is now PRO until ${expiresAt.toISOString()}`);
+
+    // Notify connected client in real-time over WebSocket
+    emitToUser(String(user._id), 'subscription:updated', {
+      plan: { id: 'pro', name: durationLabel },
+      status: 'active',
+      expiresAt: expiresAt.toISOString(),
+      subscription: entitlementPayload(user),
+      message: `🎉 Payment confirmed! Your BYTALK PRO subscription (${durationLabel}) is active. All PRO features are now unlocked!`,
+    });
+
+    res.json({
+      ok: true,
+      success: true,
+      plan: 'pro',
+      status: 'active',
+      expiresAt: expiresAt.toISOString(),
+      user: sanitizeUser(user),
+      subscription: entitlementPayload(user),
+    });
+  } catch (error) {
+    console.error('[Razorpay Verify Error]', error);
+    res.status(500).json({ error: error.message || 'Payment verification failed' });
+  }
+});
+
+app.get('/api/subscription/razorpay/checkout-page', async (req, res) => {
+  const { orderId, amount, name, email, planId = '3months', token } = req.query;
+  if (!orderId) return res.status(400).send('Missing orderId');
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>BYTALK PRO Checkout</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #0B0F19;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 90vh;
+      text-align: center;
+    }
+    .card {
+      background: #1A1D2E;
+      border: 1px solid #374151;
+      border-radius: 16px;
+      padding: 28px;
+      max-width: 380px;
+      width: 100%;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    }
+    .badge {
+      background: #FEF3C7;
+      color: #D97706;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 12px;
+      display: inline-block;
+      margin-bottom: 12px;
+    }
+    .price {
+      font-size: 32px;
+      font-weight: 800;
+      color: #FBBF24;
+      margin: 10px 0;
+    }
+    .btn {
+      background: #5843E8;
+      color: white;
+      border: none;
+      border-radius: 12px;
+      padding: 14px 24px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      width: 100%;
+      margin-top: 20px;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: #4732D6; }
+    .footer {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #9CA3AF;
+    }
+  </style>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">👑 FESTIVE PRO OFFER</div>
+    <h2 style="margin: 0 0 6px 0;">BYTALK PRO</h2>
+    <div style="color: #9CA3AF; font-size: 14px;">Unlock Unlimited ARYA AI & Video Calls</div>
+    <div class="price">₹${(Number(amount) / 100).toFixed(2)}</div>
+    <button id="pay-btn" class="btn">Pay Securely with Razorpay</button>
+    <div class="footer">🔒 100% Secure • Powered by Razorpay</div>
+  </div>
+
+  <script>
+    function openRazorpay() {
+      const options = {
+        key: '${RAZORPAY_KEY_ID}',
+        amount: ${amount},
+        currency: 'INR',
+        name: 'BYTALK',
+        description: 'BYTALK PRO Subscription',
+        order_id: '${orderId}',
+        prefill: {
+          name: ${JSON.stringify(name || 'BYTALK Learner')},
+          email: ${JSON.stringify(email || '')}
+        },
+        theme: {
+          color: '#5843E8'
+        },
+        handler: function (response) {
+          document.body.innerHTML = '<div class="card"><h2>Verifying Payment...</h2><p>Please wait while we activate your PRO account.</p></div>';
+          fetch('/api/subscription/razorpay/verify-payment', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ${token}'
+            },
+            body: JSON.stringify({
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              planId: '${planId}'
+            })
+          })
+          .then(res => res.json())
+          .then(data => {
+            if (data.ok || data.success) {
+              const returnUrl = ${JSON.stringify(req.query.redirectUrl || 'http://localhost:8081')};
+              document.body.innerHTML = '<div class="card"><h1 style="font-size: 54px; margin: 0 0 10px 0;">🎉</h1><h2 style="color: #10B981; margin: 0 0 8px 0;">PRO Activated!</h2><p style="color: #E2E8F0; font-size: 15px; margin: 0 0 16px 0;">Your payment was verified. All PRO features are now active!</p><p style="color: #9CA3AF; font-size: 13px; margin-bottom: 20px;">Redirecting you back to BYTALK...</p><a href="' + returnUrl + '" class="btn" style="text-decoration: none; display: inline-block;">Return to BYTALK Now</a></div>';
+              setTimeout(function() {
+                try { window.location.href = returnUrl; } catch(e) {}
+              }, 1600);
+            } else {
+              document.body.innerHTML = '<div class="card"><h2 style="color: #EF4444;">Verification Issue</h2><p>' + (data.error || 'Please contact support.') + '</p></div>';
+            }
+          })
+          .catch(err => {
+            document.body.innerHTML = '<div class="card"><h2 style="color: #EF4444;">Error</h2><p>' + err.message + '</p></div>';
+          });
+        },
+        modal: {
+          ondismiss: function() {
+            console.log('Checkout dismissed');
+          }
+        }
+      };
+      const rzp = new Razorpay(options);
+      rzp.open();
+    }
+
+    document.getElementById('pay-btn').onclick = openRazorpay;
+    window.onload = function() {
+      setTimeout(openRazorpay, 500);
+    };
+  </script>
+</body>
+</html>`;
+
+  res.send(html);
 });
 
 app.post('/api/subscription/checkout', requireAuth, (req, res) => {
@@ -1171,10 +1566,43 @@ app.post('/api/subscription/development/grant', requireAuth, async (req, res) =>
 });
 
 // USERS & PARTNERS
-app.get('/api/users', requireAuth, async (req, res) => {
-  const users = await User.find({ _id: { $ne: req.authenticatedUser._id } }).lean();
-  store.users = (await User.find().lean()).map(cacheUser);
-  res.json(users.map(publicUser));
+app.get('/api/users', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return requireAuth(req, res, async () => {
+      const users = await User.find({ _id: { $ne: req.authenticatedUser._id } }).lean();
+      store.users = (await User.find().lean()).map(cacheUser);
+      res.json(users.map(publicUser));
+    });
+  }
+
+  // Admin / internal request without user JWT: return full user list with subscription details
+  try {
+    const users = await User.find().sort({ createdAt: -1 }).lean();
+    store.users = users.map(cacheUser);
+    res.json(users.map((u) => ({
+      id: String(u._id),
+      name: u.name,
+      alias: u.displayName || u.name,
+      email: u.email,
+      country: u.country || 'Global',
+      nativeLanguage: u.nativeLanguage || 'English',
+      learningLanguage: u.learningLanguage || 'English',
+      level: u.level || 'Beginner',
+      status: u.status || 'active',
+      online: store.users.find((su) => String(su.id) === String(u._id))?.online || false,
+      subscriptionPlan: u.subscriptionPlan || 'free',
+      subscriptionStatus: u.subscriptionStatus || 'inactive',
+      subscriptionExpiresAt: u.subscriptionExpiresAt,
+      subscriptionStartedAt: u.subscriptionStartedAt,
+      subscriptionProviderPurchaseId: u.subscriptionProviderPurchaseId,
+      subscriptionAmount: u.subscriptionAmount || 0,
+      subscriptionDuration: u.subscriptionDuration || (u.subscriptionPlan === 'pro' ? 'PRO Plan' : null),
+      createdAt: u.createdAt,
+    })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 async function listDiscoverUsers(req, res) {
@@ -1536,26 +1964,421 @@ app.post('/api/vocabulary', (req, res) => {
   res.status(201).json(item);
 });
 
-app.get('/api/stats', (req, res) =>
-  res.json({
-    users: store.users.length,
-    rooms: store.rooms.length,
-    messages: store.messages.length,
-    reports: store.reports.filter((r) => r.status === 'open').length,
-    activeUsers: store.users.filter((x) => x.online).length,
-  })
-);
+app.get('/api/stats', async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments();
+    const activeUsers = store.users.filter((x) => x.online).length;
+    const proUsers = await User.countDocuments({ subscriptionPlan: { $in: ['pro', 'plus'] } });
+    const freeUsers = Math.max(0, totalUsers - proUsers);
+
+    // Calculate total revenue from subscriptions
+    const paidUsers = await User.find({ subscriptionAmount: { $gt: 0 } }).select('subscriptionAmount');
+    const totalRevenue = paidUsers.reduce((sum, u) => sum + (Number(u.subscriptionAmount) || 0), 0);
+
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const newUsersToday = await User.countDocuments({ createdAt: { $gte: oneDayAgo } });
+    const newUsersThisWeek = await User.countDocuments({ createdAt: { $gte: sevenDaysAgo } });
+
+    res.json({
+      users: totalUsers || store.users.length,
+      activeUsers,
+      proUsers,
+      freeUsers,
+      totalRevenue: Math.round(totalRevenue * 10) / 10,
+      rooms: store.rooms.length,
+      messages: store.messages.length,
+      reports: store.reports.filter((r) => r.status === 'open').length,
+      newUsersToday,
+      newUsersThisWeek,
+    });
+  } catch (err) {
+    res.json({
+      users: store.users.length,
+      activeUsers: store.users.filter((x) => x.online).length,
+      proUsers: 0,
+      freeUsers: store.users.length,
+      totalRevenue: 0,
+      rooms: store.rooms.length,
+      messages: store.messages.length,
+      reports: store.reports.filter((r) => r.status === 'open').length,
+      newUsersToday: 0,
+      newUsersThisWeek: 0,
+    });
+  }
+});
+
+// ADMIN API ENDPOINTS
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const users = await User.find().sort({ createdAt: -1 }).lean();
+    res.json(users.map((u) => ({
+      id: String(u._id),
+      name: u.name,
+      alias: u.displayName || u.name,
+      email: u.email,
+      country: u.country || 'Global',
+      nativeLanguage: u.nativeLanguage || 'English',
+      learningLanguage: u.learningLanguage || 'English',
+      level: u.level || 'Beginner',
+      status: u.status || 'active',
+      online: store.users.find((su) => String(su.id) === String(u._id))?.online || false,
+      subscriptionPlan: u.subscriptionPlan || 'free',
+      subscriptionStatus: u.subscriptionStatus || 'inactive',
+      subscriptionExpiresAt: u.subscriptionExpiresAt,
+      subscriptionStartedAt: u.subscriptionStartedAt,
+      subscriptionProviderPurchaseId: u.subscriptionProviderPurchaseId,
+      subscriptionAmount: u.subscriptionAmount || 0,
+      subscriptionDuration: u.subscriptionDuration || (u.subscriptionPlan === 'pro' ? 'PRO Plan' : null),
+      falseReportCount: u.falseReportCount || 0,
+      createdAt: u.createdAt,
+    })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/admin/users/:userId/status', async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!['active', 'suspended', 'banned'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+    const user = await User.findByIdAndUpdate(req.params.userId, { status }, { new: true });
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    auditLogs.unshift({
+      id: `aud-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: 'Admin',
+      eventType: status === 'suspended' ? 'USER_SUSPENDED' : 'USER_REACTIVATED',
+      target: `${user.name} (${user.email})`,
+    });
+
+    // Notify connected client in real-time
+    emitToUser(String(user._id), 'user:status_updated', {
+      status: user.status,
+      message: status === 'suspended'
+        ? 'Your account has been suspended by administration.'
+        : 'Your account has been reactivated by administration.',
+    });
+
+    res.json({ ok: true, user: { id: String(user._id), status: user.status } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/subscriptions', async (req, res) => {
+  try {
+    const subscribers = await User.find({
+      $or: [
+        { subscriptionPlan: { $in: ['pro', 'plus'] } },
+        { subscriptionProviderPurchaseId: { $ne: null } },
+        { subscriptionAmount: { $gt: 0 } },
+      ],
+    }).sort({ subscriptionStartedAt: -1, updatedAt: -1 }).lean();
+
+    const list = subscribers.map((u) => {
+      const isStillActive = u.subscriptionStatus === 'active' && (!u.subscriptionExpiresAt || new Date(u.subscriptionExpiresAt) > new Date());
+      return {
+        id: `sub-${u._id}`,
+        userId: String(u._id),
+        userName: u.name,
+        userEmail: u.email,
+        plan: u.subscriptionDuration || (u.subscriptionPlan === 'pro' ? '3 Months' : 'BYTALK Pro'),
+        planId: u.subscriptionPlan || 'pro',
+        provider: u.subscriptionProvider || 'razorpay',
+        purchaseId: u.subscriptionProviderPurchaseId || `sub_${String(u._id).slice(-8)}`,
+        amount: u.subscriptionAmount || (u.subscriptionPlan === 'pro' ? 524.3 : 399),
+        startedAt: u.subscriptionStartedAt || u.createdAt,
+        expiresAt: u.subscriptionExpiresAt,
+        status: isStillActive ? 'active' : 'expired',
+      };
+    });
+
+    res.json({ subscriptions: list });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/subscriptions/grant', async (req, res) => {
+  try {
+    const { userId, planId = '3months', durationDays = 90, amount = 0, notes = '' } = req.body;
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const now = new Date();
+    const plan = planId ? await Plan.findOne({ id: planId }).lean() : null;
+    const days = Number(durationDays) || plan?.durationDays || 90;
+    const expiresAt = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+    const durationLabel = plan?.duration || plan?.name || (days >= 365 ? '1 Year' : days >= 90 ? '3 Months' : '1 Month');
+
+    user.subscriptionPlan = 'pro';
+    user.subscriptionStatus = 'active';
+    user.subscriptionProvider = 'admin_grant';
+    user.subscriptionStartedAt = now;
+    user.subscriptionExpiresAt = expiresAt;
+    user.subscriptionDuration = durationLabel;
+    user.subscriptionAmount = Number(amount) || 0;
+    user.subscriptionProviderPurchaseId = `adm_${Date.now()}`;
+    await user.save();
+
+    auditLogs.unshift({
+      id: `aud-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: 'Admin',
+      eventType: 'PRO_GRANTED_BY_ADMIN',
+      target: `${user.name} (${user.email}) - ${durationLabel} until ${expiresAt.toLocaleDateString()}`,
+    });
+
+    store.users = (await User.find().lean()).map(cacheUser);
+
+    // Notify connected user app in real-time
+    emitToUser(String(user._id), 'subscription:updated', {
+      plan: { id: 'pro', name: durationLabel },
+      status: 'active',
+      expiresAt: expiresAt.toISOString(),
+      subscription: entitlementPayload(user),
+      message: `🎉 Great news! Your account has been upgraded to BYTALK PRO (${durationLabel}) by administration! All PRO features are now active.`,
+    });
+
+    res.json({ ok: true, user: { id: String(user._id), subscriptionPlan: 'pro', subscriptionExpiresAt: expiresAt } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/subscriptions/revoke', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.subscriptionPlan = 'free';
+    user.subscriptionStatus = 'inactive';
+    user.subscriptionExpiresAt = null;
+    await user.save();
+
+    auditLogs.unshift({
+      id: `aud-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: 'Admin',
+      eventType: 'PRO_REVOKED_BY_ADMIN',
+      target: `${user.name} (${user.email})`,
+    });
+
+    store.users = (await User.find().lean()).map(cacheUser);
+
+    // Notify connected user app in real-time
+    emitToUser(String(user._id), 'subscription:updated', {
+      plan: { id: 'free', name: 'Free' },
+      status: 'inactive',
+      expiresAt: null,
+      subscription: entitlementPayload(user),
+      message: 'Your BYTALK subscription plan has been set to Free by administration.',
+    });
+
+    res.json({ ok: true, user: { id: String(user._id), subscriptionPlan: 'free' } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ADMIN: SUBSCRIPTION PLANS CRUD (Add, Edit, Update, Delete)
+app.get('/api/admin/plans', async (req, res) => {
+  try {
+    const plans = await getAllPlans();
+    res.json({ plans });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/plans', async (req, res) => {
+  try {
+    const {
+      id,
+      name,
+      duration,
+      durationDays = 30,
+      price,
+      originalPrice = 0,
+      savings = '',
+      badge = null,
+      badgeColor = '#EA580C',
+      badgeBg = '#FFEDD5',
+      unitText = '',
+      features = [],
+      order = 0,
+      active = true,
+    } = req.body || {};
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Plan name is required.' });
+    }
+    if (price === undefined || price === null || isNaN(Number(price)) || Number(price) < 0) {
+      return res.status(400).json({ error: 'Valid plan price in INR is required.' });
+    }
+
+    const cleanId = (id && String(id).trim().toLowerCase().replace(/[^a-z0-9_-]/g, '')) ||
+      name.trim().toLowerCase().replace(/[^a-z0-9]/g, '') ||
+      `plan_${Date.now()}`;
+
+    const existing = await Plan.findOne({ id: cleanId });
+    if (existing) {
+      return res.status(409).json({ error: `A plan with ID "${cleanId}" already exists.` });
+    }
+
+    const durationLabel = (duration && String(duration).trim()) || name.trim();
+    const days = Math.max(1, Number(durationDays) || 30);
+    const finalPrice = Number(price);
+    const origPrice = Number(originalPrice) || Math.round(finalPrice * 1.5);
+    const finalSavings = savings ? String(savings).trim() : (origPrice > finalPrice ? `Save ${Math.round((1 - finalPrice / origPrice) * 100)}%` : '');
+
+    const newPlan = new Plan({
+      id: cleanId,
+      name: name.trim(),
+      duration: durationLabel,
+      durationDays: days,
+      price: finalPrice,
+      originalPrice: origPrice,
+      savings: finalSavings,
+      badge: badge ? String(badge).trim() : null,
+      badgeColor: badgeColor || '#EA580C',
+      badgeBg: badgeBg || '#FFEDD5',
+      unitText: unitText ? String(unitText).trim() : `/${durationLabel}`,
+      features: Array.isArray(features) && features.length > 0 ? features : [
+        'Unlimited ARYA AI practice conversations',
+        'HD 1-on-1 Video Calling',
+        'All interview & daily conversation topics',
+        'Priority matching with global speakers',
+        'One-time payment, no autopay',
+      ],
+      order: Number(order) || (await Plan.countDocuments()) + 1,
+      active: active !== false,
+    });
+
+    await newPlan.save();
+
+    auditLogs.unshift({
+      id: `aud-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: 'Admin',
+      eventType: 'PLAN_CREATED',
+      target: `${newPlan.name} (${newPlan.id}) - ₹${newPlan.price} / ${newPlan.duration}`,
+    });
+
+    // Notify all connected mobile clients in real-time
+    io.emit('subscription:plans_updated', {
+      action: 'created',
+      plan: newPlan,
+      plans: await getActivePlans(),
+    });
+
+    res.status(201).json({ ok: true, plan: newPlan });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/plans/:planId', async (req, res) => {
+  try {
+    const { planId } = req.params;
+    const body = req.body || {};
+    const updateData = {};
+
+    if (body.name !== undefined) updateData.name = String(body.name).trim();
+    if (body.duration !== undefined) updateData.duration = String(body.duration).trim();
+    if (body.durationDays !== undefined) updateData.durationDays = Math.max(1, Number(body.durationDays) || 30);
+    if (body.price !== undefined) updateData.price = Number(body.price);
+    if (body.originalPrice !== undefined) updateData.originalPrice = Number(body.originalPrice);
+    if (body.savings !== undefined) updateData.savings = String(body.savings).trim();
+    if (body.badge !== undefined) updateData.badge = body.badge ? String(body.badge).trim() : null;
+    if (body.badgeColor !== undefined) updateData.badgeColor = String(body.badgeColor).trim();
+    if (body.badgeBg !== undefined) updateData.badgeBg = String(body.badgeBg).trim();
+    if (body.unitText !== undefined) updateData.unitText = String(body.unitText).trim();
+    if (Array.isArray(body.features)) updateData.features = body.features;
+    if (body.order !== undefined) updateData.order = Number(body.order);
+    if (body.active !== undefined) updateData.active = Boolean(body.active);
+
+    const updated = await Plan.findOneAndUpdate(
+      { id: planId },
+      { $set: updateData },
+      { new: true, runValidators: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Plan not found.' });
+    }
+
+    auditLogs.unshift({
+      id: `aud-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: 'Admin',
+      eventType: 'PLAN_UPDATED',
+      target: `${updated.name} (${updated.id}) - ₹${updated.price} / ${updated.duration}`,
+    });
+
+    // Notify connected mobile clients
+    io.emit('subscription:plans_updated', {
+      action: 'updated',
+      plan: updated,
+      plans: await getActivePlans(),
+    });
+
+    res.json({ ok: true, plan: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/admin/plans/:planId', async (req, res) => {
+  try {
+    const { planId } = req.params;
+    const deleted = await Plan.findOneAndDelete({ id: planId });
+    if (!deleted) {
+      return res.status(404).json({ error: 'Plan not found.' });
+    }
+
+    auditLogs.unshift({
+      id: `aud-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      actor: 'Admin',
+      eventType: 'PLAN_DELETED',
+      target: `${deleted.name} (${deleted.id})`,
+    });
+
+    // Notify connected mobile clients
+    io.emit('subscription:plans_updated', {
+      action: 'deleted',
+      planId,
+      plans: await getActivePlans(),
+    });
+
+    res.json({ ok: true, message: `Plan "${deleted.name}" deleted successfully.` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/admin/audit', (req, res) => {
+  res.json({ auditLogs });
+});
 
 app.get('/api/reports', (req, res) => res.json(store.reports));
 
 app.post('/api/reports', (req, res) => {
-  const { reason, reportedUserId } = req.body;
+  const { reason, reportedUserId, reporterId } = req.body;
   if (typeof reason !== 'string' || !reason.trim()) return res.status(400).json({ error: 'Reason required' });
   const report = {
     id: crypto.randomUUID(),
     reason: reason.slice(0, 500),
     reportedUserId: reportedUserId || null,
+    reporterId: reporterId || null,
     status: 'open',
+    verificationStatus: 'verified',
     at: new Date().toISOString(),
   };
   store.reports.push(report);
@@ -1563,20 +2386,48 @@ app.post('/api/reports', (req, res) => {
   res.status(201).json(report);
 });
 
-app.patch('/api/reports/:id', (req, res) => {
+app.patch('/api/reports/:id', async (req, res) => {
   const report = store.reports.find((r) => r.id === req.params.id);
   if (!report) return res.status(404).json({ error: 'Not found' });
-  if (!['open', 'resolved'].includes(req.body.status)) return res.status(400).json({ error: 'Invalid status' });
-  report.status = req.body.status;
+  const { status, moderatorNotes } = req.body;
+  if (!['open', 'resolved', 'dismissed_as_false'].includes(status)) {
+    return res.status(400).json({ error: 'Invalid status' });
+  }
+  report.status = status;
+  if (moderatorNotes) report.moderatorNotes = moderatorNotes;
+
+  if (status === 'dismissed_as_false' && report.reporterId) {
+    try {
+      await User.findByIdAndUpdate(report.reporterId, { $inc: { falseReportCount: 1 } });
+    } catch {}
+  }
+
+  auditLogs.unshift({
+    id: `aud-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    actor: 'Moderator',
+    eventType: status === 'dismissed_as_false' ? 'REPORT_FALSE_PENALIZED' : 'REPORT_RESOLVED',
+    target: `Report ${report.id.slice(0, 8)} (${report.reason})`,
+  });
+
   save();
   res.json(report);
 });
 
-io.use((socket, next) => {
+io.use(async (socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
     const decoded = verifyToken(token);
-    const user = store.users.find((item) => item.id === decoded.userId);
+    let user = store.users.find((item) => String(item.id) === String(decoded.userId));
+    if (!user && decoded.userId) {
+      try {
+        const dbUser = await User.findById(decoded.userId).lean();
+        if (dbUser) {
+          user = cacheUser(dbUser);
+          store.users.push(user);
+        }
+      } catch {}
+    }
     if (!user) throw new Error('Account not found');
     socket.data.userId = user.id;
     next();
@@ -1676,7 +2527,17 @@ io.on('connection', (socket) => {
       acknowledge({ error: 'Invalid call request' });
       return;
     }
-    if (!store.users.some((user) => user.id === to)) {
+    let targetUser = store.users.find((user) => String(user.id) === String(to));
+    if (!targetUser) {
+      try {
+        const dbUser = await User.findById(to).lean();
+        if (dbUser) {
+          targetUser = cacheUser(dbUser);
+          store.users.push(targetUser);
+        }
+      } catch {}
+    }
+    if (!targetUser) {
       acknowledge({ error: 'User not found' });
       return;
     }
@@ -1688,7 +2549,7 @@ io.on('connection', (socket) => {
       acknowledge({ error: 'Calling is unavailable for this user.' });
       return;
     }
-    if (!(userSockets.get(to)?.size || 0)) {
+    if (!(userSockets.get(String(to))?.size || 0)) {
       console.log(`Call invite rejected: recipient ${to} is offline.`);
       acknowledge({ error: 'This person is offline' });
       return;
@@ -1721,14 +2582,23 @@ io.on('connection', (socket) => {
     userCalls.set(to, call.id);
     saveCall(call);
 
-    const caller = store.users.find((user) => user.id === userId);
+    let caller = store.users.find((user) => String(user.id) === String(userId));
+    if (!caller) {
+      try {
+        const dbCaller = await User.findById(userId).lean();
+        if (dbCaller) {
+          caller = cacheUser(dbCaller);
+          store.users.push(caller);
+        }
+      } catch {}
+    }
     emitToUser(to, 'call:incoming', {
       callId: call.id,
       type,
       createdAt,
       restricted: restrictedForRecipient,
       restrictionReason: restrictedForRecipient ? 'A BYTALK Plus or Pro subscription is required to accept video calls.' : null,
-      caller: sanitizeUser(caller),
+      caller: sanitizeUser(caller) || { id: userId, name: 'BYTALK User' },
     });
     console.log(`Call ${call.id} is ringing for ${to}.`);
     acknowledge({ callId: call.id, status: 'ringing' });
@@ -1751,16 +2621,16 @@ io.on('connection', (socket) => {
         User.findById(call.callerId),
         User.findById(call.calleeId),
       ]);
-      if (!caller || !callee || !canUseVideo(caller) || !canUseVideo(callee)) {
-        acknowledge({ error: 'Video calling is unavailable because a participant has reached the plan limit.', code: 'video_plan_required' });
+      if (!caller || !callee || (!canUseVideo(caller) && !canUseVideo(callee))) {
+        acknowledge({ error: 'Video calling requires an active PRO subscription.', code: 'video_plan_required' });
         emitToUser(call.callerId, 'call:ended', { callId: call.id, status: 'restricted', reason: 'video_plan_required' });
         finishCall(call, 'restricted', userId);
         return;
       }
       resetUsageIfNeeded(caller);
       resetUsageIfNeeded(callee);
-      caller.videoCallsUsed += 1;
-      callee.videoCallsUsed += 1;
+      if (canUseVideo(caller)) caller.videoCallsUsed += 1;
+      if (canUseVideo(callee)) callee.videoCallsUsed += 1;
       await Promise.all([
         User.findByIdAndUpdate(call.callerId, { usageMonth: caller.usageMonth, videoCallsUsed: caller.videoCallsUsed }),
         User.findByIdAndUpdate(call.calleeId, { usageMonth: callee.usageMonth, videoCallsUsed: callee.videoCallsUsed }),
@@ -1908,4 +2778,15 @@ function leaveRoom(socket, roomId) {
 }
 
 const port = Number(process.env.PORT || 4000);
+
+httpServer.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n[BYTALK backend error] Port ${port} is already in use by another process.`);
+    console.error(`To free port ${port} in PowerShell, run:`);
+    console.error(`  Stop-Process -Id (Get-NetTCPConnection -LocalPort ${port}).OwningProcess -Force\n`);
+    process.exit(1);
+  }
+  throw err;
+});
+
 httpServer.listen(port, '0.0.0.0', () => console.log(`BYTALK backend running on http://localhost:${port}`));

@@ -199,3 +199,5 @@ The application code and backend signaling can be validated locally, but success
 - Authenticated calling: `GET /api/rtc-config`, `GET /api/calls`; Socket.IO call events use the authenticated session and relay only between call participants.
 - Authenticated room media: `GET /api/rooms/:id/session`; Socket.IO room events are `room:join`, `room:leave`, `room:state`, `room:participant-joined`, and `room:participant-left`.
 - Other existing routes continue to provide onboarding, rooms, vocabulary, statistics, and reports.
+#   B Y T A L K - A P P  
+ 

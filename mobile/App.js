@@ -18,6 +18,7 @@ import {
   KeyboardAvoidingView,
   Linking,
   Switch,
+  BackHandler,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -28,6 +29,16 @@ import CallAudio from './CallAudio';
 import CallVideo from './CallVideo';
 import { configureSubscription, purchasePlan, restorePurchases } from './src/subscription';
 import { speakText, speakEnglish, stopSpeech, isSpeaking, LANGUAGE_LOCALES } from './src/utils/speechHelper';
+import ringtoneManager from './src/utils/ringtoneHelper';
+import AryaTopBar from './src/components/AryaTopBar';
+import AryaBottomNav from './src/components/AryaBottomNav';
+import AryaHomeScreen from './src/components/AryaHomeScreen';
+import ProSubscriptionScreen from './src/components/ProSubscriptionScreen';
+import ProfileScreen from './src/components/ProfileScreen';
+import LearnScreen from './src/components/LearnScreen';
+import CallTabScreen from './src/components/CallTabScreen';
+import LeaderboardModal from './src/components/LeaderboardModal';
+import HistoryModal from './src/components/HistoryModal';
 
 const welcomeImage = require('./assets/bytalk-welcome-art.png');
 
@@ -476,9 +487,60 @@ function App() {
   const isShortViewport = viewportHeight < 560;
   const welcomeIllustrationHeight = Math.max(110, Math.min(180, viewportHeight * 0.34));
   const [screen, setScreen] = useState('welcome');
+  const [activeBottomTab, setActiveBottomTab] = useState('home');
+
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
+  const [showHistoryModal, setShowHistoryModal] = useState(false);
+  const [userStars, setUserStars] = useState(40);
+  const [streak, setStreak] = useState(1);
+  const [isMatchingCall, setIsMatchingCall] = useState(false);
+  const [aryaSettings, setAryaSettings] = useState({
+    voice: 'FEMALE',
+    speed: '1x',
+    nativeLanguage: 'Other (English)',
+  });
+
+  const handleBottomTabPress = (tabId) => {
+    setActiveBottomTab(tabId);
+    if (tabId === 'home') {
+      setScreen('home');
+    } else if (tabId === 'learn') {
+      setScreen('learn');
+    } else if (tabId === 'pro') {
+      setScreen('premium');
+    } else if (tabId === 'call') {
+      setScreen('call-tab');
+    } else if (tabId === 'discover') {
+      setScreen('discover');
+    }
+    loadSubscription().catch(() => {});
+  };
+
+  const handleStartRandomMatch = async () => {
+    setIsMatchingCall(true);
+    try {
+      const candidates = partners.filter((p) => p.online && p.id !== userId);
+      const pool = candidates.length > 0 ? candidates : partners.filter((p) => p.id !== userId);
+      if (pool.length > 0) {
+        const randomPartner = pool[Math.floor(Math.random() * pool.length)];
+        setTimeout(() => {
+          setIsMatchingCall(false);
+          startCall(randomPartner, 'audio');
+        }, 800);
+      } else {
+        setTimeout(() => {
+          setIsMatchingCall(false);
+          Alert.alert('No Partners Available', 'All partners are currently offline or busy. Try practicing with ARYA AI on the Home tab!');
+        }, 1200);
+      }
+    } catch {
+      setIsMatchingCall(false);
+    }
+  };
   const [sessionChecking, setSessionChecking] = useState(true);
   const [userId, setUserId] = useState(null);
   const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
   const [country, setCountry] = useState('');
   const [nativeLanguage, setNativeLanguage] = useState('');
   const [learningLanguage, setLearningLanguage] = useState('English');
@@ -635,11 +697,15 @@ function App() {
     setSubscriptionError('');
     try {
       const [plans, current] = await Promise.all([
-        request('subscription/plans'),
-        request('subscription/status'),
+        request('subscription/plans').catch(() => null),
+        request('subscription/status').catch(() => null),
       ]);
-      setSubscriptionPlans(Array.isArray(plans) ? plans : []);
-      setSubscription(current);
+      if (Array.isArray(plans) && plans.length > 0) {
+        setSubscriptionPlans(plans);
+      }
+      if (current) {
+        setSubscription(current);
+      }
     } catch (error) {
       setSubscriptionError(error.userMessage || error.message || 'Subscription status is unavailable.');
     } finally {
@@ -649,15 +715,20 @@ function App() {
   }
 
   function hasVideoEntitlement() {
-    if (!subscription || !['plus', 'pro'].includes(subscription.plan?.id)) return false;
-    if (!['active', 'cancelled'].includes(subscription.status)) return false;
+    if (!subscription) return false;
+    const planId = subscription.plan?.id;
+    const isProTier = ['plus', 'pro'].includes(planId) || subscription.active === true;
+    if (!isProTier) return false;
+    const status = subscription.status || (subscription.active ? 'active' : 'inactive');
+    if (!['active', 'cancelled'].includes(status)) return false;
     return !subscription.expiresAt || new Date(subscription.expiresAt) > new Date();
   }
 
   async function openSubscription() {
     setSubscriptionError('');
-    await loadSubscription();
+    setActiveBottomTab('pro');
     setScreen('premium');
+    loadSubscription().catch(() => {});
   }
 
   async function buySubscription(plan) {
@@ -755,6 +826,7 @@ function App() {
   }
 
   function releaseCallMedia() {
+    ringtoneManager.stopRinging();
     const connection = peerRef.current?.connection;
     if (connection) {
       connection.onicecandidate = null;
@@ -978,7 +1050,9 @@ function App() {
   function leaveCallCompletion() {
     setCallCompletion(null);
     updateCall(null);
-    setScreen('dashboard');
+    const target = (activeBottomTab && activeBottomTab !== 'pro') ? activeBottomTab : 'call-tab';
+    setActiveBottomTab(target === 'call-tab' ? 'call' : target);
+    setScreen(target);
   }
 
   async function submitCallFeedback() {
@@ -1088,12 +1162,13 @@ function App() {
           }
         });
       }
+      ringtoneManager.startRinging({ direction: 'outgoing' });
       updateCall((previous) => previous ? { ...previous, id: result.callId, status: 'Ringing' } : previous);
     } catch (error) {
       console.warn('[BYTALK call] failed', error.message || error);
       releaseCallMedia();
       updateCall(null);
-      setScreen('discover');
+      setScreen(activeBottomTab === 'pro' ? 'call-tab' : (activeBottomTab || 'call-tab'));
       if (error.code === 'video_plan_required') {
         setSubscriptionError(error.message);
         setScreen('premium');
@@ -1106,6 +1181,7 @@ function App() {
   }
 
   async function acceptCall() {
+    ringtoneManager.stopRinging();
     const incoming = callRef.current;
     if (!incoming?.id || incoming.direction !== 'incoming') return;
     try {
@@ -1191,13 +1267,18 @@ function App() {
         if (meRes && meRes.ok && meRes.user) {
           if (meRes.user.id) setUserId(meRes.user.id);
           if (meRes.user.name) setName(meRes.user.name);
+          if (meRes.user.email) setEmail(meRes.user.email);
           if (meRes.user.country) setCountry(meRes.user.country);
           if (meRes.user.nativeLanguage) setNativeLanguage(meRes.user.nativeLanguage);
           if (meRes.user.learningLanguage) setLearningLanguage(meRes.user.learningLanguage);
           if (meRes.user.level) setLevel(meRes.user.level);
           setPracticeInterests(Array.isArray(meRes.user.practiceInterests) ? meRes.user.practiceInterests : []);
+          if (meRes.subscription) {
+            setSubscription(meRes.subscription);
+          }
           await authStorage.setItem(SESSION_USER_KEY, JSON.stringify(meRes.user));
-          setScreen('discover');
+          setScreen('home');
+          setActiveBottomTab('home');
         } else {
           await clearSession();
           setScreen('welcome');
@@ -1306,8 +1387,8 @@ function App() {
       });
       socket.on('presence:update', ({ userId: changedId, online }) => {
         console.log('[BYTALK presence] update', { userId: changedId, online });
-        setPartners((previous) => previous.map((partner) => partner.id === changedId ? { ...partner, online } : partner));
-        setSelected((previous) => previous.id === changedId ? { ...previous, online } : previous);
+        setPartners((previous) => previous.map((partner) => String(partner.id) === String(changedId) ? { ...partner, online } : partner));
+        setSelected((previous) => String(previous.id) === String(changedId) ? { ...previous, online } : previous);
       });
       socket.on('presence:state', (onlineUserIds) => {
         const online = new Set((onlineUserIds || []).map(String));
@@ -1321,7 +1402,7 @@ function App() {
       socket.on('call:incoming', (incoming) => {
         console.log('[BYTALK call] incoming call received', { callId: incoming.callId, type: incoming.type });
         if (callRef.current?.id === incoming.callId) return;
-        const peer = partnersRef.current.find((partner) => partner.id === incoming.caller.id) || incoming.caller;
+        const peer = partnersRef.current.find((partner) => String(partner.id) === String(incoming.caller?.id)) || incoming.caller;
         setSelected(peer);
         updateCall({
           id: incoming.callId,
@@ -1333,10 +1414,12 @@ function App() {
         });
         setCallNotice(incoming.restrictionReason || '');
         setScreen('call');
+        ringtoneManager.startRinging({ direction: 'incoming' });
         notifyIncomingCall(incoming);
       });
       socket.on('call:accepted', ({ callId }) => {
         console.log('[BYTALK call] call accepted', { callId, userId });
+        ringtoneManager.stopRinging();
         if (callRef.current?.id === callId) createCallOffer(callId);
       });
       socket.on('call:signal', (signal) => handleCallSignal(signal));
@@ -1367,6 +1450,43 @@ function App() {
             : '';
         finishCallLocally(status === 'missed' ? 'Missed' : status === 'rejected' ? 'Rejected' : 'Ended', message, { endedAt, durationSeconds });
       });
+      socket.on('subscription:updated', (payload) => {
+        console.log('[BYTALK socket] subscription:updated received', payload);
+        if (payload?.subscription) {
+          setSubscription(payload.subscription);
+        } else if (payload?.plan) {
+          setSubscription({
+            plan: payload.plan,
+            status: payload.status || 'active',
+            expiresAt: payload.expiresAt || null,
+          });
+        }
+        loadSubscription().catch(() => {});
+        if (screenRef.current === 'premium') {
+          setActiveBottomTab('home');
+          setScreen('home');
+        }
+        if (payload?.message) {
+          Alert.alert('🎉 Subscription Active', payload.message);
+        }
+      });
+      socket.on('subscription:plans_updated', (payload) => {
+        console.log('[BYTALK socket] subscription:plans_updated received', payload);
+        if (Array.isArray(payload?.plans) && payload.plans.length > 0) {
+          setSubscriptionPlans(payload.plans);
+        } else {
+          loadSubscription().catch(() => {});
+        }
+      });
+      socket.on('user:status_updated', ({ status, message }) => {
+        console.log('[BYTALK socket] user:status_updated received', { status, message });
+        if (status === 'suspended') {
+          Alert.alert('Account Suspended', message || 'Your account has been suspended by administration.');
+          performLogout();
+        } else if (status === 'active' && message) {
+          Alert.alert('Account Notice', message);
+        }
+      });
       socket.connect();
     }
 
@@ -1381,7 +1501,7 @@ function App() {
   }, [sessionChecking, sessionVersion, userId]);
 
   useEffect(() => {
-    if (!sessionChecking && screen === 'discover') loadDiscoverUsers();
+    if (!sessionChecking && (screen === 'discover' || screen === 'call-tab' || screen === 'home') && activeAuthToken) loadDiscoverUsers();
   }, [screen, sessionChecking, sessionVersion, userId]);
 
   useEffect(() => {
@@ -1517,14 +1637,19 @@ function App() {
         setSessionVersion((value) => value + 1);
         if (res.user.id) setUserId(res.user.id);
         if (res.user.name) setName(res.user.name);
+        if (res.user.email) setEmail(res.user.email);
         if (res.user.country) setCountry(res.user.country);
         if (res.user.nativeLanguage) setNativeLanguage(res.user.nativeLanguage);
         if (res.user.learningLanguage) setLearningLanguage(res.user.learningLanguage);
         if (res.user.level) setLevel(res.user.level);
         setPracticeInterests(Array.isArray(res.user.practiceInterests) ? res.user.practiceInterests : []);
+        if (res.subscription) {
+          setSubscription(res.subscription);
+        }
         setLoginPassword('');
         setBackendUp(true);
-        setScreen('discover');
+        setScreen('home');
+        setActiveBottomTab('home');
       } else {
         setLoginError('Authentication failed: Server did not return a valid session token.');
       }
@@ -1597,6 +1722,10 @@ function App() {
         setSessionVersion((value) => value + 1);
         if (res.user.id) setUserId(res.user.id);
         setName(nameTrimmed);
+        setEmail(emailTrimmed);
+        if (res.subscription) {
+          setSubscription(res.subscription);
+        }
         setRegPassword('');
         setRegConfirmPassword('');
         setBackendUp(true);
@@ -1620,7 +1749,7 @@ function App() {
 
   // LOGOUT HANDLER (Requirement 9)
   // Core logout logic — clears session, disconnects socket, resets state, navigates to welcome.
-  const performLogout = async () => {
+  async function performLogout() {
     if (logoutBusy) return;
     setLogoutBusy(true);
     try {
@@ -1630,6 +1759,7 @@ function App() {
       setSessionVersion((value) => value + 1);
       setUserId(null);
       setName('');
+      setEmail('');
       setCountry('');
       setNativeLanguage('');
       setLearningLanguage('English');
@@ -2179,6 +2309,130 @@ function App() {
     </View>
   );
 
+  // Universal Back Navigation & Hardware Back Button Handler (Prevents White Blank Screen)
+  useEffect(() => {
+    const onHardwareBackPress = () => {
+      // 1. Modals
+      if (showLeaderboard) {
+        setShowLeaderboard(false);
+        return true;
+      }
+      if (showHistoryModal) {
+        setShowHistoryModal(false);
+        return true;
+      }
+
+      // 2. Active call
+      if (screen === 'call' && call) {
+        Alert.alert('Leave Call?', 'Do you want to end your active conversation?', [
+          { text: 'Stay', style: 'cancel' },
+          { text: 'End Call', style: 'destructive', onPress: endCall },
+        ]);
+        return true;
+      }
+
+      // 3. Call complete screen
+      if (screen === 'call-complete') {
+        leaveCallCompletion();
+        return true;
+      }
+
+      // 4. AI Practice screen
+      if (screen === 'aiPractice') {
+        stopSpeech();
+        setAiSession(null);
+        setAiCompletion(null);
+        setActiveBottomTab('home');
+        setScreen('home');
+        return true;
+      }
+
+      // 5. Chat screen -> Messages or Discover
+      if (screen === 'chat') {
+        setScreen('messages');
+        return true;
+      }
+
+      // 6. Messages screen -> Discover
+      if (screen === 'messages') {
+        setActiveBottomTab('discover');
+        setScreen('discover');
+        return true;
+      }
+
+      // 7. Settings sub-screens -> Settings
+      if (['manage-account', 'legal-terms', 'legal-privacy'].includes(screen)) {
+        setScreen('settings');
+        return true;
+      }
+
+      // 8. Settings -> Profile
+      if (screen === 'settings') {
+        setScreen('profile');
+        return true;
+      }
+
+      // 9. Profile screen -> Home or active tab
+      if (screen === 'profile') {
+        const fallback = (activeBottomTab && activeBottomTab !== 'pro') ? activeBottomTab : 'home';
+        setActiveBottomTab(fallback);
+        setScreen(fallback);
+        return true;
+      }
+
+      // 10. Pro subscription screen -> Home or active tab
+      if (screen === 'premium') {
+        const fallback = (activeBottomTab && activeBottomTab !== 'pro') ? activeBottomTab : 'home';
+        setActiveBottomTab(fallback);
+        setScreen(fallback);
+        return true;
+      }
+
+      // 11. Practice screens -> Home
+      if (screen === 'practice' || screen === 'practiceSession') {
+        setActiveBottomTab('home');
+        setScreen('home');
+        return true;
+      }
+
+      // 12. Non-home bottom tabs -> go to Home
+      if (['learn', 'call-tab', 'discover'].includes(screen)) {
+        setActiveBottomTab('home');
+        setScreen('home');
+        return true;
+      }
+
+      // 13. If on Home, allow standard Android behavior
+      if (screen === 'home') {
+        return false;
+      }
+
+      // Fallback: Return to home
+      setActiveBottomTab('home');
+      setScreen('home');
+      return true;
+    };
+
+    const sub = BackHandler.addEventListener('hardwareBackPress', onHardwareBackPress);
+    return () => sub.remove();
+  }, [screen, call, showLeaderboard, showHistoryModal, activeBottomTab]);
+
+  // Safety guardian: If on invalid/null screen state or legacy dashboard, auto-restore
+  useEffect(() => {
+    if (screen === 'dashboard') {
+      setActiveBottomTab('home');
+      setScreen('home');
+    }
+    if (screen === 'call' && !call) {
+      setActiveBottomTab('call');
+      setScreen('call-tab');
+    }
+    if (screen === 'call-complete' && !callCompletion) {
+      setActiveBottomTab('call');
+      setScreen('call-tab');
+    }
+  }, [screen, call, callCompletion]);
+
   if (sessionChecking) {
     return (
       <SafeAreaView style={[styles.safeArea, { justifyContent: 'center', alignItems: 'center' }]}>
@@ -2200,34 +2454,33 @@ function App() {
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={{ flex: 1 }}
         >
-          {/* Top brand header */}
-          {!['welcome', 'login', 'register'].includes(screen) && (
-            <View style={styles.topBar}>
-              <TouchableOpacity onPress={() => setScreen('welcome')} style={styles.logoRowSmall}>
-                <Text style={{ fontSize: 20, fontWeight: '900', color: COLORS.primary, marginRight: 6 }}>BT</Text>
-                <Text style={{ fontSize: 20, fontWeight: '900', color: navy }}>
-                  BY<Text style={{ color: orange }}>TALK</Text>
-                </Text>
-              </TouchableOpacity>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 7 }}>
-                  <View style={{ width: 7, height: 7, borderRadius: 6, backgroundColor: backendUp ? '#168653' : '#F0B64A' }} />
-                  <Txt size={11} color={muted}>{backendUp ? 'API Online' : 'API Offline'}</Txt>
-                </View>
-                <TouchableOpacity
-                  onPress={handleLogout}
-                  style={[styles.topLogoutButton, logoutBusy && { opacity: 0.45 }]}
-                  activeOpacity={0.7}
-                  disabled={logoutBusy}
-                  accessibilityRole="button"
-                  accessibilityLabel="Log out of BYTALK"
-                >
-                  {logoutBusy
-                    ? <ActivityIndicator size="small" color={COLORS.textSecondary} />
-                    : <Ionicons name="log-out-outline" size={18} color={COLORS.textSecondary} />}
-                </TouchableOpacity>
-              </View>
-            </View>
+          {/* Top unified ARYA Header on main screens (Images 1 & 4) */}
+          {!['welcome', 'login', 'register', 'onboard', 'level', 'call', 'call-complete', 'profile', 'premium', 'aiPractice'].includes(screen) && (
+            <AryaTopBar
+              user={{ displayName: name || 'Prateek Pawar', streak: streak || 0 }}
+              userStats={{ streak: streak || 0 }}
+              currentScreen={screen}
+              onPressBack={() => {
+                setActiveBottomTab('home');
+                setScreen('home');
+              }}
+              onPressProfile={() => setScreen('profile')}
+              onPressGetPro={() => {
+                setActiveBottomTab('pro');
+                setScreen('premium');
+              }}
+              onPressLeaderboard={() => setShowLeaderboard(true)}
+              onPressNotifications={() => {
+                const isProActive = subscription?.plan?.id === 'pro' || subscription?.plan?.id === 'plus' || subscription?.active === true;
+                Alert.alert(
+                  '🔔 BYTALK Updates & Notifications',
+                  isProActive
+                    ? '👑 PRO Membership Active! You have full access to unlimited ARYA AI conversations, HD 1-on-1 Video Calling, and all interview topics.'
+                    : '🎉 Festive PRO Offer is Live! Get 25% off all PRO plans with unlimited ARYA AI & Video Calls.'
+                );
+              }}
+              isPro={subscription?.plan?.id === 'pro' || subscription?.plan?.id === 'plus' || subscription?.active === true}
+            />
           )}
           {messageBanner && (
             <TouchableOpacity
@@ -2236,6 +2489,62 @@ function App() {
             >
               <Txt size={12} color={navy} bold>{messageBanner.sender.displayName || messageBanner.sender.name}: <Txt size={12} color={navy} bold={false}>{messageBanner.text}</Txt></Txt>
             </TouchableOpacity>
+          )}
+
+          {/* SCREEN: ARYA HOME (IMAGE 1) */}
+          {screen === 'home' && (
+            <AryaHomeScreen
+              user={{ displayName: name, streak }}
+              onSelectTopic={(topic) => startAiPractice(topic)}
+              onPressGetPro={() => {
+                setActiveBottomTab('pro');
+                setScreen('premium');
+              }}
+              onPressHistory={() => setShowHistoryModal(true)}
+              isPro={subscription?.plan?.id === 'pro' || subscription?.plan?.id === 'plus' || subscription?.active === true}
+            />
+          )}
+
+          {/* SCREEN: LEARN PATHWAY (IMAGE 4) */}
+          {screen === 'learn' && (
+            <LearnScreen
+              user={{ displayName: name, streak }}
+              onPressHistory={() => setShowHistoryModal(true)}
+              onAddStars={(amount) => setUserStars((prev) => prev + amount)}
+            />
+          )}
+
+          {/* SCREEN: CALL TAB */}
+          {screen === 'call-tab' && (
+            <CallTabScreen
+              partners={partners}
+              callHistory={callHistory}
+              onStartCall={(partner, type) => startCall(partner, type)}
+              onStartRandomMatch={handleStartRandomMatch}
+              isMatching={isMatchingCall}
+            />
+          )}
+
+          {/* SCREEN: PROFILE (IMAGE 3) */}
+          {screen === 'profile' && (
+            <ProfileScreen
+              user={{ displayName: name, email: email || 'pratikumeshpawar@gmail.com' }}
+              onBack={() => {
+                setActiveBottomTab('home');
+                setScreen('home');
+              }}
+              onPressGetPro={() => {
+                setActiveBottomTab('pro');
+                setScreen('premium');
+              }}
+              onUpdateProfile={({ name: newName }) => {
+                setName(newName);
+              }}
+              onLogout={handleLogout}
+              aryaSettings={aryaSettings}
+              onUpdateAryaSettings={(newSettings) => setAryaSettings(newSettings)}
+              isPro={subscription?.plan?.id === 'pro' || subscription?.plan?.id === 'plus' || subscription?.active === true}
+            />
           )}
 
           {/* SCREEN 1: WELCOME SCREEN */}
@@ -2964,7 +3273,7 @@ function App() {
 
           {screen === 'messages' && (
             <ScrollView contentContainerStyle={{ paddingBottom: 24 }}>
-              <Header title="Messages" subtitle="Your latest conversations" />
+              <Header title="Messages" subtitle="Your latest conversations" onBack={() => { setActiveBottomTab('discover'); setScreen('discover'); }} />
               {!conversations.length ? (
                 <View style={{ padding: 24, alignItems: 'center' }}>
                   <Txt color={muted}>No conversations yet. Start a chat from Discover.</Txt>
@@ -3160,7 +3469,7 @@ function App() {
               {!feedbackSubmitted ? (
                 <Btn label="Skip" outline onPress={leaveCallCompletion} />
               ) : (
-                <Btn label="Back to profile" onPress={leaveCallCompletion} />
+                <Btn label="Done" onPress={leaveCallCompletion} />
               )}
             </ScrollView>
           )}
@@ -3224,6 +3533,26 @@ function App() {
 
               <View style={styles.callStatusArea}>
                 <Txt color="#FFFFFF" size={15} bold>{call.status}</Txt>
+                {call.status === 'Ringing' && (
+                  <View style={{ marginTop: 10, alignItems: 'center' }}>
+                    <View style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      backgroundColor: 'rgba(245, 158, 11, 0.25)',
+                      borderWidth: 1.5,
+                      borderColor: '#F59E0B',
+                      borderRadius: 24,
+                      paddingHorizontal: 16,
+                      paddingVertical: 8,
+                      gap: 8,
+                    }}>
+                      <Txt size={22}>🔔</Txt>
+                      <Txt color="#FFD166" size={13} bold>
+                        {call.direction === 'incoming' ? 'Incoming Ringing Bell...' : 'Calling... Ringing Bell...'}
+                      </Txt>
+                    </View>
+                  </View>
+                )}
                 {callNotice ? <Txt color="#FFD4C8" size={12} style={{ textAlign: 'center', marginTop: 8 }}>{callNotice}</Txt> : null}
               </View>
 
@@ -3343,7 +3672,7 @@ function App() {
           {/* SCREEN 8: LANGUAGE PRACTICE */}
           {screen === 'practice' && (
             <ScrollView contentContainerStyle={{ padding: 20, paddingBottom: 30 }}>
-              <Header title="Language Practice" subtitle={`Build confidence in ${learningLanguage || 'your learning language'} with short daily exercises.`} />
+              <Header title="Language Practice" subtitle={`Build confidence in ${learningLanguage || 'your learning language'} with short daily exercises.`} onBack={() => { setActiveBottomTab('home'); setScreen('home'); }} />
               <View style={styles.practiceProgressCard}>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
                   <View>
@@ -3543,26 +3872,17 @@ function App() {
                 <TouchableOpacity
                   onPress={() => {
                     stopSpeech();
-                    if (aiMessages.length > 2 && !aiCompletion) {
-                      Alert.alert(
-                        'Leave AI Practice?',
-                        'Would you like to finish this conversation or return to topics?',
-                        [
-                          { text: 'Cancel', style: 'cancel' },
-                          { text: 'End Session', onPress: endAiPractice },
-                          { text: 'Leave', style: 'destructive', onPress: () => { setAiSession(null); setScreen('practice'); } },
-                        ]
-                      );
-                    } else {
-                      setAiSession(null);
-                      setScreen('practice');
-                    }
+                    setAiSession(null);
+                    setAiCompletion(null);
+                    setActiveBottomTab('home');
+                    setScreen('home');
                   }}
                   style={styles.aiBackButton}
+                  hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
                   accessibilityRole="button"
                   accessibilityLabel="Back to practice topics"
                 >
-                  <Ionicons name="arrow-back" size={22} color={navy} />
+                  <Ionicons name="arrow-back" size={24} color={navy} />
                 </TouchableOpacity>
 
                 <View style={styles.aiHeaderTitleSection}>
@@ -3677,7 +3997,8 @@ function App() {
                       onPress={() => {
                         setAiCompletion(null);
                         setAiMessages([]);
-                        setScreen('practice');
+                        setActiveBottomTab('home');
+                        setScreen('home');
                       }}
                       style={{ marginTop: 16, width: '100%' }}
                     />
@@ -3687,7 +4008,8 @@ function App() {
                       onPress={() => {
                         setAiCompletion(null);
                         setAiMessages([]);
-                        setScreen('discover');
+                        setActiveBottomTab('call');
+                        setScreen('call-tab');
                       }}
                       style={{ marginTop: 10, width: '100%' }}
                     />
@@ -3852,68 +4174,39 @@ function App() {
           )}
 
           {screen === 'premium' && (
-            <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 32 }}>
-              <Header title="BYTALK Premium" subtitle="Choose the plan that fits your language journey." onBack={() => setScreen('dashboard')} />
-              {subscriptionError ? (
-                <View style={{ padding: 12, borderRadius: 12, backgroundColor: '#FFF0ED', marginBottom: 14 }}>
-                  <Txt color={COLORS.error} size={12}>{subscriptionError}</Txt>
-                  <Btn label="Retry" outline onPress={loadSubscription} disabled={subscriptionLoading} style={{ marginTop: 10, paddingVertical: 10 }} />
-                </View>
-              ) : null}
-              {subscriptionLoading && subscriptionPlans.length === 0 ? (
-                <View style={{ padding: 24, alignItems: 'center' }}>
-                  <ActivityIndicator color={orange} />
-                  <Txt size={12} color={muted} style={{ marginTop: 10 }}>Loading subscription plans…</Txt>
-                </View>
-              ) : null}
-              <Txt size={12} color={muted} style={{ marginBottom: 14 }}>
-                Current plan: <Txt bold color={navy}>{subscription?.plan?.name || 'Loading...'}</Txt> · {subscription?.status || 'unknown'}
-              </Txt>
-              {subscription?.expiresAt ? (
-                <Txt size={11} color={muted} style={{ marginBottom: 14 }}>
-                  {subscription.status === 'active' ? 'Renews or expires' : 'Expired'}: {new Date(subscription.expiresAt).toLocaleDateString()}
-                  {subscription.renewalStatus ? ` · ${subscription.renewalStatus}` : ''}
-                </Txt>
-              ) : null}
-              {!subscriptionLoading && subscriptionPlans.length === 0 && !subscriptionError ? (
-                <Txt size={12} color={muted} style={{ marginBottom: 14 }}>No subscription plans are currently available.</Txt>
-              ) : null}
-              {subscriptionPlans.map((plan) => (
-                <View key={plan.id} style={{ padding: 18, borderRadius: 16, borderWidth: plan.id === subscription?.plan?.id ? 2 : 1, borderColor: plan.id === subscription?.plan?.id ? orange : '#E9E7EF', backgroundColor: '#fff', marginBottom: 14 }}>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Txt size={18} bold>{plan.name}</Txt>
-                    <Txt size={16} bold color={orange}>{plan.priceInr === 0 ? 'Free' : `₹${plan.priceInr}/${plan.billingInterval || 'month'}`}</Txt>
-                  </View>
-                  {plan.features.map((feature) => <Txt key={feature} size={12} color={muted} style={{ marginTop: 9 }}>✓ {feature}</Txt>)}
-                  {plan.id !== 'free' && plan.id !== subscription?.plan?.id ? (
-                    <Btn label={subscriptionBusy ? 'Processing...' : `Upgrade to ${plan.name}`} onPress={() => buySubscription(plan)} disabled={subscriptionBusy} style={{ marginTop: 14 }} />
-                  ) : null}
-                </View>
-              ))}
-              <Btn label="Restore purchases" outline onPress={restoreSubscription} disabled={subscriptionBusy} style={{ marginBottom: 14 }} />
-              {subscription?.testMode ? (
-                <View style={{ padding: 14, borderRadius: 12, backgroundColor: '#FFF8E8', marginBottom: 14 }}>
-                  <Txt size={12} bold color="#8A5A00">Development-only test entitlements</Txt>
-                  <Txt size={11} color="#8A5A00" style={{ marginTop: 5 }}>These controls are disabled when NODE_ENV is production and never represent a store purchase.</Txt>
-                  <View style={{ flexDirection: 'row', marginTop: 10 }}>
-                    <Btn label="Test Plus" onPress={() => grantDevelopmentSubscription('plus')} disabled={subscriptionBusy} style={{ flex: 1, marginRight: 6 }} />
-                    <Btn label="Test Pro" onPress={() => grantDevelopmentSubscription('pro')} disabled={subscriptionBusy} style={{ flex: 1, marginLeft: 6 }} />
-                  </View>
-                </View>
-              ) : null}
-              <Txt size={11} color={muted} style={{ lineHeight: 17 }}>
-                Subscriptions renew monthly unless cancelled in your App Store or Google Play account. Web browsers do not support native in-app purchases in this build.
-              </Txt>
-              <View style={{ flexDirection: 'row', marginTop: 12 }}>
-                {TERMS_URL ? <TouchableOpacity onPress={() => Linking.openURL(TERMS_URL)}><Txt size={12} color={orange} bold>Terms</Txt></TouchableOpacity> : null}
-                {PRIVACY_URL ? <TouchableOpacity onPress={() => Linking.openURL(PRIVACY_URL)} style={{ marginLeft: 18 }}><Txt size={12} color={orange} bold>Privacy</Txt></TouchableOpacity> : null}
-              </View>
-            </ScrollView>
+            <ProSubscriptionScreen
+              user={{ displayName: name || 'BYTALK Learner', email: email || 'learner@bytalk.app' }}
+              onBack={() => {
+                setActiveBottomTab('home');
+                setScreen('home');
+              }}
+              isPro={subscription?.plan?.id === 'pro' || subscription?.plan?.id === 'plus' || subscription?.active === true}
+              onRequest={request}
+              activeAuthToken={activeAuthToken}
+              apiBase={API}
+              activeBottomTab={activeBottomTab}
+              plans={subscriptionPlans}
+              onPurchaseSuccess={(plan, updatedSub) => {
+                if (updatedSub) {
+                  setSubscription(updatedSub);
+                } else {
+                  setSubscription({
+                    plan: { id: 'pro', name: plan?.duration || 'PRO' },
+                    status: 'active',
+                    active: true,
+                    expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString(),
+                  });
+                }
+                loadSubscription().catch(() => {});
+                setActiveBottomTab('home');
+                setScreen('home');
+              }}
+            />
           )}
 
           {screen === 'settings' && (
             <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 36 }}>
-              <Header title="Settings" subtitle="Personalize your BYTALK experience." onBack={() => setScreen('dashboard')} />
+              <Header title="Settings" subtitle="Personalize your BYTALK experience." onBack={() => setScreen('profile')} />
               {settingsLoading ? <ActivityIndicator color={orange} style={{ margin: 20 }} /> : null}
               {settingsError ? <Txt color={COLORS.error} size={12} style={{ marginBottom: 12 }}>{settingsError}</Txt> : null}
               {settings ? (
@@ -4018,6 +4311,26 @@ function App() {
 
           {screen === 'legal-privacy' && (
             <ScrollView contentContainerStyle={{ padding: 22, paddingBottom: 36 }}><Header title="Privacy Policy" onBack={() => setScreen('settings')} /><Txt size={13} color={muted} style={{ lineHeight: 21 }}>BYTALK stores account profile information, preferences, messages, call history, and subscription entitlement information to provide the service. Authenticated access controls limit account data to its owner. Messages and call history are retained according to the service configuration. Do not publish this summary as the approved privacy policy until it has been reviewed and replaced with the current legal policy.</Txt></ScrollView>
+          )}
+
+          {/* SCREEN GUARDIAN: NEVER SHOW WHITE BLANK SCREEN */}
+          {![
+            'welcome', 'login', 'register', 'onboard', 'level',
+            'home', 'learn', 'call-tab', 'profile', 'discover',
+            'messages', 'chat', 'premium', 'practice', 'practiceSession',
+            'aiPractice', 'settings', 'manage-account', 'legal-terms', 'legal-privacy',
+            'dashboard',
+          ].includes(screen) && !(screen === 'call' && call) && !(screen === 'call-complete' && callCompletion) && (
+            <AryaHomeScreen
+              user={{ displayName: name, streak }}
+              onSelectTopic={(topic) => startAiPractice(topic)}
+              onPressGetPro={() => {
+                setActiveBottomTab('pro');
+                setScreen('premium');
+              }}
+              onPressHistory={() => setShowHistoryModal(true)}
+              isPro={subscription?.plan?.id === 'pro' || subscription?.plan?.id === 'plus' || subscription?.active === true}
+            />
           )}
 
           {/* SCREEN 9: LEARNING DASHBOARD */}
@@ -4156,29 +4469,27 @@ function App() {
             </ScrollView>
           )}
 
-          {/* BOTTOM TAB BAR (ONLY ON MAIN LOGGED-IN SCREENS) */}
-          {!['welcome', 'login', 'register', 'onboard', 'level', 'call', 'call-complete', 'settings', 'manage-account', 'legal-terms', 'legal-privacy'].includes(screen) && (
-            <View style={styles.tabBar}>
-              {tabItems.map(([id, icon, label]) => (
-                <TouchableOpacity key={id} onPress={() => {
-                  if (id === 'chat') requestNotificationPermission();
-                  if (id === 'practice') {
-                    setSearch('');
-                    setPracticeTopic(PRACTICE_TOPICS[0]);
-                  }
-                  setScreen(id === 'chat' ? 'messages' : id);
-                }} style={styles.tabItem}>
-                  <Ionicons name={icon} size={22} color={screen === id || (id === 'chat' && screen === 'messages') ? orange : '#98a3b3'} />
-                  <Txt size={10} color={screen === id || (id === 'chat' && screen === 'messages') ? orange : muted} bold={screen === id || (id === 'chat' && screen === 'messages')}>{label}</Txt>
-                  {id === 'chat' && Object.values(unreadByUser).reduce((sum, count) => sum + count, 0) > 0 && (
-                    <View style={{ position: 'absolute', top: -3, right: 12, minWidth: 16, height: 16, paddingHorizontal: 4, borderRadius: 8, backgroundColor: COLORS.error, alignItems: 'center', justifyContent: 'center' }}>
-                      <Txt color="#fff" size={9} bold>{Object.values(unreadByUser).reduce((sum, count) => sum + count, 0)}</Txt>
-                    </View>
-                  )}
-                </TouchableOpacity>
-              ))}
-            </View>
+          {/* BOTTOM NAVIGATION (ARYA 5-TAB BAR) */}
+          {!['welcome', 'login', 'register', 'onboard', 'level', 'call', 'call-complete', 'profile', 'aiPractice', 'manage-account', 'legal-terms', 'legal-privacy'].includes(screen) && (
+            <AryaBottomNav
+              activeTab={activeBottomTab}
+              onTabPress={handleBottomTabPress}
+              unreadCount={Object.values(unreadByUser).reduce((sum, count) => sum + count, 0)}
+              isPro={subscription?.plan?.id === 'pro' || subscription?.plan?.id === 'plus' || subscription?.active === true}
+            />
           )}
+
+          <LeaderboardModal
+            visible={showLeaderboard}
+            onClose={() => setShowLeaderboard(false)}
+            currentUser={{ name }}
+          />
+
+          <HistoryModal
+            visible={showHistoryModal}
+            onClose={() => setShowHistoryModal(false)}
+            callHistory={callHistory}
+          />
         </KeyboardAvoidingView>
       </View>
     </SafeAreaView>

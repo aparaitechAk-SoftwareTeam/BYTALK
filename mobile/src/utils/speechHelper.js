@@ -42,7 +42,7 @@ export const LANGUAGE_LOCALES = {
 
 let activeUtterance = null;
 
-export const speakText = (text, language = 'English', onStart, onEnd) => {
+export const speakText = (text, language = 'English', onStart, onEnd, options = {}) => {
   if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
     try {
       window.speechSynthesis.cancel();
@@ -52,14 +52,24 @@ export const speakText = (text, language = 'English', onStart, onEnd) => {
       const utterance = new SpeechSynthesisUtterance(cleanText);
       const targetLocale = LANGUAGE_LOCALES[language] || 'en-US';
       utterance.lang = targetLocale;
-      utterance.rate = 0.9; // Slightly slower, articulate pace for language learners
-      utterance.pitch = 1.0;
+
+      // Rate adjustments based on settings
+      let rate = 0.95;
+      if (options.speed === '0.75x') rate = 0.75;
+      else if (options.speed === '1.25x') rate = 1.25;
+      else if (options.speed === '1x') rate = 1.0;
+      utterance.rate = rate;
+      utterance.pitch = options.gender === 'MALE' ? 0.9 : 1.1;
 
       // Try to find a matching voice if voices are loaded
       const voices = window.speechSynthesis.getVoices();
       if (voices && voices.length > 0) {
         const langPrefix = targetLocale.split('-')[0].toLowerCase();
-        const matchedVoice = voices.find((v) => v.lang.toLowerCase().startsWith(langPrefix))
+        const preferredGender = (options.gender || 'FEMALE').toLowerCase();
+        const matchedVoice = voices.find(
+          (v) => (v.lang.toLowerCase().startsWith(langPrefix) || v.lang.toLowerCase().includes(langPrefix)) &&
+                 (preferredGender === 'male' ? v.name.toLowerCase().includes('male') || v.name.toLowerCase().includes('david') : v.name.toLowerCase().includes('female') || v.name.toLowerCase().includes('zira') || v.name.toLowerCase().includes('samantha'))
+        ) || voices.find((v) => v.lang.toLowerCase().startsWith(langPrefix))
           || voices.find((v) => v.lang.toLowerCase().includes(langPrefix));
         if (matchedVoice) utterance.voice = matchedVoice;
       }

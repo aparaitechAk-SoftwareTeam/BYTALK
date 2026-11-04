@@ -1,3 +1,4 @@
+import dns from 'dns';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 import { User } from '../src/models/User.js';
@@ -43,6 +44,11 @@ const testUsers = [
   },
 ];
 
+if (uri.startsWith('mongodb+srv://')) {
+  try {
+    dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
+  } catch {}
+}
 await mongoose.connect(uri);
 try {
   for (const testUser of testUsers) {

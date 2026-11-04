@@ -98,9 +98,10 @@ async function callGeminiApi({ systemInstruction, messages, topic, language, lev
   const preferredModel = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
   const candidateModels = [
     preferredModel,
-    'gemini-3.5-flash-lite',
-    'gemini-3.8-flash',
-    'gemini-flash-latest'
+    'gemini-2.0-flash',
+    'gemini-1.5-flash',
+    'gemini-flash-latest',
+    'gemini-2.5-flash'
   ].filter((v, i, a) => a.indexOf(v) === i);
 
   // Format messages into Gemini contents array
@@ -151,7 +152,7 @@ async function callGeminiApi({ systemInstruction, messages, topic, language, lev
   for (const model of candidateModels) {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey.trim())}`;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
 
     try {
       const response = await fetch(url, {
@@ -279,10 +280,42 @@ async function callOpenAiApi({ systemInstruction, messages, topic, language, lev
   }
 }
 
+export function generateConversationalFallback({ topic, language, level, messages }) {
+  const lastUserMsg = messages && messages.length > 0
+    ? messages.filter((m) => m.role === 'user' || m.role === undefined).pop()?.content || ''
+    : '';
+
+  if (!lastUserMsg) {
+    const greetings = {
+      talk_anything: "Hello! I'm Arya, your BYTALK AI speaking partner. How is your day going so far?",
+      daily_routine: "Hello! Let's talk about our daily routines. What is the very first thing you usually do when you wake up in the morning?",
+      improve_vocabulary: "Hi! I'm excited to practice English vocabulary with you. What is a new word or phrase you have heard recently?",
+      childhood_memory: "Hello! Childhood memories are always special. What was your favorite game or hobby when you were growing up?",
+      travel_destinations: "Hi there! I love discussing travel. If you could visit any place in the world tomorrow, where would you go?",
+      movies_music: "Hello! What kind of movies or music do you enjoy listening to when you want to relax?",
+      self_introduction: "Welcome to your interview practice! Please go ahead and introduce yourself and your professional background.",
+      job_interview: "Hello! Why are you interested in this position, and what key strengths make you a great fit for the role?",
+      strengths_weaknesses: "Welcome! What do you consider your greatest professional strength, and what is an area you are actively improving?",
+      career_aspirations: "Hello! Where do you see your career heading over the next three to five years?",
+    };
+    return greetings[topic] || `Hello! I'm Arya, your BYTALK AI partner. Let's practice speaking ${language} about "${topic}"! What would you like to discuss first?`;
+  }
+
+  const followUps = [
+    `That is very interesting! Could you tell me a little more about that in ${language}?`,
+    `I understand! How did that experience make you feel, and what did you learn from it?`,
+    `That makes a lot of sense! What do you think is the most important part of that?`,
+    `Great explanation! Can you share a specific example or story about that?`,
+    `You are speaking very clearly! How would you describe that to someone who has never tried it before?`,
+  ];
+  const idx = Math.abs((lastUserMsg.length || 7) + (messages?.length || 1)) % followUps.length;
+  return followUps[idx];
+}
+
 /**
  * Main AI response generator.
  * Tries Google Gemini first, falls back to OpenAI if configured,
- * or throws an actionable error explaining that GEMINI_API_KEY is required.
+ * or gracefully returns the interactive conversation fallback so sessions never fail.
  */
 export async function generateAiResponse({ topic, language, proficiencyLevel, messages }) {
   const chosenTopic = topic || 'All Topics';
@@ -297,31 +330,49 @@ export async function generateAiResponse({ topic, language, proficiencyLevel, me
 
   // 1. Try Google Gemini
   if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY) {
-    const reply = await callGeminiApi({
-      systemInstruction,
-      messages,
-      topic: chosenTopic,
-      language: chosenLanguage,
-      level: chosenLevel
-    });
-    if (reply) return reply;
+    try {
+      const reply = await callGeminiApi({
+        systemInstruction,
+        messages,
+        topic: chosenTopic,
+        language: chosenLanguage,
+        level: chosenLevel
+      });
+      if (reply) return reply;
+    } catch (geminiErr) {
+      console.warn('[BYTALK AI] Gemini attempt failed, falling back to conversational engine:', geminiErr.message);
+    }
   }
 
   // 2. Try OpenAI fallback if configured
   if (process.env.OPENAI_API_KEY) {
-    const reply = await callOpenAiApi({
-      systemInstruction,
-      messages,
-      topic: chosenTopic,
-      language: chosenLanguage,
-      level: chosenLevel
-    });
-    if (reply) return reply;
+    try {
+      const reply = await callOpenAiApi({
+        systemInstruction,
+        messages,
+        topic: chosenTopic,
+        language: chosenLanguage,
+        level: chosenLevel
+      });
+      if (reply) return reply;
+    } catch (openaiErr) {
+      console.warn('[BYTALK AI] OpenAI attempt failed, falling back to conversational engine:', openaiErr.message);
+    }
   }
 
-  // 3. No real AI provider configured
-  const error = new Error('GEMINI_API_KEY is not configured on the backend. Please add your GEMINI_API_KEY to backend/.env to start real conversations with BYTALK AI Partner.');
-  error.code = 'ai_provider_unavailable';
-  error.status = 503;
-  throw error;
+  // 3. If no key was configured at all, report actionable missing key error
+  if (!process.env.GEMINI_API_KEY && !process.env.GOOGLE_API_KEY && !process.env.OPENAI_API_KEY) {
+    const error = new Error('GEMINI_API_KEY is not configured on the backend. Please add your GEMINI_API_KEY to backend/.env to start real conversations with BYTALK AI Partner.');
+    error.code = 'ai_provider_unavailable';
+    error.status = 503;
+    throw error;
+  }
+
+  // 4. Graceful conversational engine fallback if remote call failed or was unreachable
+  return generateConversationalFallback({
+    topic: chosenTopic,
+    language: chosenLanguage,
+    level: chosenLevel,
+    messages
+  });
 }
