@@ -6,7 +6,7 @@
     "start": "node --env-file=.env src/index.js",
     "dev": "node --env-file=.env --watch src/index.js",
     "seed:users": "node --env-file=.env scripts/seed-users.js",
-    "test": "node --test test/*.test.js"
+    "start": "node src/index.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
