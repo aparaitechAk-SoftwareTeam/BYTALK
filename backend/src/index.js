@@ -49,9 +49,12 @@ if (!LIVEKIT_AVAILABLE) {
 const REVENUECAT_WEBHOOK_AUTH = process.env.REVENUECAT_WEBHOOK_AUTH || '';
 const REVENUECAT_PLUS_ENTITLEMENT = process.env.REVENUECAT_PLUS_ENTITLEMENT || 'bytalk_plus';
 const REVENUECAT_PRO_ENTITLEMENT = process.env.REVENUECAT_PRO_ENTITLEMENT || 'bytalk_pro';
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || 'rzp_live_TvoCCSairIqmOY';
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || 'TE12vGfhhrOJfbYUXQawyayi';
-const RAZORPAY_AVAILABLE = Boolean(RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || '';
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '';
+
+const RAZORPAY_AVAILABLE = Boolean(
+  RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET
+);
 if (RAZORPAY_AVAILABLE) {
   console.log(`Razorpay payment gateway initialized with Key: ${RAZORPAY_KEY_ID.slice(0, 12)}...`);
 }
@@ -391,8 +394,11 @@ const auditLogs = [
 ];
 
 const mongoUri = process.env.MONGODB_URI;
+
 if (!mongoUri) {
-  throw new Error('MONGODB_URI must be configured in backend/.env.');
+  throw new Error(
+    'MONGODB_URI is missing. Configure it in Render Environment Variables.'
+  );
 }
 
 try {
