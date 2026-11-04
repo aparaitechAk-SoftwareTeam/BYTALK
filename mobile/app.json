@@ -1,3 +1,4 @@
+
 {
   "expo": {
     "name": "BYTALK",
@@ -5,13 +6,17 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "scheme": "bytalk",
+
     "ios": {
+      "bundleIdentifier": "com.bytalk.languageapp",
       "supportsTablet": true,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "BYTALK uses your microphone for private voice and video calls.",
         "NSCameraUsageDescription": "BYTALK uses your camera for private video calls."
       }
     },
+
     "android": {
       "package": "com.bytalk.languageapp",
       "permissions": [
@@ -20,6 +25,7 @@
         "android.permission.MODIFY_AUDIO_SETTINGS"
       ]
     },
+
     "plugins": [
       "expo-secure-store",
       [
