@@ -1,12 +1,12 @@
+
 {
   "name": "bytalk-backend",
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node --env-file=.env src/index.js",
+    "start": "node src/index.js",
     "dev": "node --env-file=.env --watch src/index.js",
-    "seed:users": "node --env-file=.env scripts/seed-users.js",
-    "start": "node src/index.js"
+    "seed:users": "node --env-file=.env scripts/seed-users.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
